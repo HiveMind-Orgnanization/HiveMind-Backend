@@ -29,6 +29,11 @@ type SwarmJob = {
   data?: unknown;
   error?: string;
   startedAt: number;
+  progress?: {
+    currentRole: string | null;
+    completedRoles: string[];
+    partialResults: Array<{ role: string; agentName: string; replySnippet: string; provider: string; model: string }>;
+  };
 };
 const swarmJobs = new Map<string, SwarmJob>();
 // Prune completed jobs older than 2 hours so the Map doesn't grow unbounded.
@@ -1267,6 +1272,18 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       }
     };
 
+    const pushProgress = (role: string, agentName: string, replySnippet: string, provider: string, model: string) => {
+      const j = swarmJobs.get(jobId);
+      if (!j) return;
+      const prev = j.progress ?? { currentRole: null, completedRoles: [], partialResults: [] };
+      swarmJobs.set(jobId, { ...j, progress: { currentRole: null, completedRoles: [...prev.completedRoles, role], partialResults: [...prev.partialResults, { role, agentName, replySnippet, provider, model }] } });
+    };
+    const setCurrentRole = (role: string | null) => {
+      const j = swarmJobs.get(jobId);
+      if (!j) return;
+      swarmJobs.set(jobId, { ...j, progress: { ...(j.progress ?? { completedRoles: [], partialResults: [] }), currentRole: role } });
+    };
+
     const runOne = async (role: string, opts?: { userSuffix?: string; artifactHeavy?: boolean }) => {
       const agent = pickAgent(role);
       const taskMeta = taskByRole.get(role);
@@ -1294,6 +1311,7 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
         { type: "agent.activity", payload: { agent: agent.name, message: `[work] ${role} · building…`, ts: Date.now() } },
         `mission:${id}`,
       );
+      setCurrentRole(role);
 
       const artifactJsonRoles = new Set(["Development", "Coordination", "Design"]);
       const landingSupplement =
@@ -1397,6 +1415,7 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
             const upd = await st.patchTask(taskMeta.id, { status: "failed" });
             if (upd) hub.broadcast({ type: "task.updated", payload: upd }, `mission:${id}`);
           }
+          pushProgress(role, agent.name, res.reply.slice(0, 500), res.provider, res.model);
           return {
             role,
             agentId: agent.id,
@@ -1479,6 +1498,7 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
           `mission:${id}`,
         );
 
+        pushProgress(role, agent.name, res.reply.slice(0, 2000), res.provider, res.model);
         return {
           role,
           agentId: agent.id,
@@ -1500,6 +1520,7 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
           { type: "agent.activity", payload: { agent: agent.name, message: `[swarm] ${role} failed: ${reason}`, ts: Date.now() } },
           `mission:${id}`,
         );
+        pushProgress(role, agent.name, "", "mock", "error");
         return {
           role,
           agentId: agent.id,
@@ -2053,7 +2074,7 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
     const job = swarmJobs.get(jid);
     if (!job) return reply.status(404).send({ error: "not_found", message: "Job not found or already expired." });
     if (job.missionId !== id || job.wallet !== wallet) return reply.status(403).send({ error: "forbidden" });
-    return { status: job.status, data: job.data ?? null, error: job.error ?? null };
+    return { status: job.status, data: job.data ?? null, error: job.error ?? null, progress: job.progress ?? null };
   });
 
   app.get("/api/missions/:id", async (req, reply) => {
