@@ -20,6 +20,23 @@ import {
 import { appendSwarmQualityLog } from "../services/swarm-quality-log";
 import type { Mission } from "../types/domain";
 
+// ── Swarm-run async job tracking ─────────────────────────────────────────────
+type SwarmJobStatus = "running" | "done" | "failed";
+type SwarmJob = {
+  status: SwarmJobStatus;
+  missionId: string;
+  wallet: string;
+  data?: unknown;
+  error?: string;
+  startedAt: number;
+};
+const swarmJobs = new Map<string, SwarmJob>();
+// Prune completed jobs older than 2 hours so the Map doesn't grow unbounded.
+setInterval(() => {
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  for (const [k, v] of swarmJobs) if (v.startedAt < cutoff) swarmJobs.delete(k);
+}, 10 * 60 * 1000).unref();
+
 const budgetAllocationSchema = z.object({
   agentCompute: z.number().min(0).max(1),
   tokenUsage: z.number().min(0).max(1),
@@ -1013,6 +1030,16 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       }
     }
 
+    // ── Respond immediately so the HTTP proxy never times out ────────────────
+    const jobId = `swarm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const jobStartedAt = Date.now();
+    swarmJobs.set(jobId, { status: "running", missionId: id, wallet, startedAt: jobStartedAt });
+    void reply.status(202).send({ jobId, status: "running" });
+
+    // Everything below runs in the background — the HTTP response is already sent.
+    void (async () => {
+    try {
+
     const startedAt = Date.now();
 
     // Ensure a Mission Brief exists before running roles.
@@ -1988,18 +2015,45 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
     const coordRaw = outputByRole.get("Coordination")?.reply ?? "";
     const coordParsed = parseArtifacts(coordRaw);
     const finalReply = coordParsed?.summary ?? coordRaw;
-    return {
-      persisted: Boolean(m),
-      etaLabel,
-      startedAt,
-      finishedAt: Date.now(),
-      results,
-      finalReply,
-      verification,
-      fileTree,
-      artifactPaths: dedupedPaths,
-      mission: updatedMission ?? null,
-    };
+    swarmJobs.set(jobId, {
+      status: "done",
+      missionId: id,
+      wallet,
+      startedAt: jobStartedAt,
+      data: {
+        persisted: Boolean(m),
+        etaLabel,
+        startedAt,
+        finishedAt: Date.now(),
+        results,
+        finalReply,
+        verification,
+        fileTree,
+        artifactPaths: dedupedPaths,
+        mission: updatedMission ?? null,
+      },
+    });
+    } catch (swarmErr) {
+      const errMsg = swarmErr instanceof Error ? swarmErr.message : String(swarmErr);
+      swarmJobs.set(jobId, { status: "failed", missionId: id, wallet, error: errMsg, startedAt: jobStartedAt });
+    }
+    })(); // end background IIFE
+  }); // end swarm-run POST route
+
+  /** GET /api/missions/:id/swarm-status/:jobId — poll until status !== "running". */
+  app.get("/api/missions/:id/swarm-status/:jobId", async (req, reply) => {
+    let wallet: string;
+    try {
+      wallet = requireWallet(req);
+    } catch (e) {
+      const err = e as { statusCode?: number };
+      return reply.status(err.statusCode ?? 401).send({ error: "unauthorized" });
+    }
+    const { id, jobId: jid } = req.params as { id: string; jobId: string };
+    const job = swarmJobs.get(jid);
+    if (!job) return reply.status(404).send({ error: "not_found", message: "Job not found or already expired." });
+    if (job.missionId !== id || job.wallet !== wallet) return reply.status(403).send({ error: "forbidden" });
+    return { status: job.status, data: job.data ?? null, error: job.error ?? null };
   });
 
   app.get("/api/missions/:id", async (req, reply) => {
