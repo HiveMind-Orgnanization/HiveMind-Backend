@@ -1,0 +1,24 @@
+CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
+  username VARCHAR(50) NOT NULL,
+  email VARCHAR(100) NOT NULL UNIQUE,
+  passwordHash VARCHAR(255) NOT NULL,
+  createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE transactions (
+  id SERIAL PRIMARY KEY,
+  userId INT REFERENCES users(id),
+  cryptoType VARCHAR(50) NOT NULL,
+  amount DECIMAL(18, 8) NOT NULL,
+  price DECIMAL(18, 8) NOT NULL,
+  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE market_data (
+  id SERIAL PRIMARY KEY,
+  cryptoType VARCHAR(50) NOT NULL,
+  currentPrice DECIMAL(18, 8) NOT NULL,
+  volume DECIMAL(18, 8) NOT NULL,
+  marketCap DECIMAL(18, 8) NOT NULL
+);

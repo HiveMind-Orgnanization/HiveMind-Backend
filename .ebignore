@@ -1,0 +1,8 @@
+# Exclude heavy local-only folders from the EB deployment zip
+node_modules
+.git
+.env
+*.log
+.hivemind-logs
+docker-compose.yml
+# Keep dist/ — it is compiled by the container_command in .ebextensions/01_node.config

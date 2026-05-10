@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-secondary text-primary;
+}
+
+h1, h2, h3 {
+  @apply font-bold;
+}
+
+button {
+  @apply transition duration-300 ease-in-out transform hover:scale-105;
+}

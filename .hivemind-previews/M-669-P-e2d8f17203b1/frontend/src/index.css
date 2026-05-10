@@ -1,0 +1,37 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+
+body {
+  font-family: 'Inter', sans-serif;
+  margin: 0;
+  padding: 0;
+  background-color: #121212;
+  color: #FFFFFF;
+}
+
+.bg-dark-blue {
+  background-color: #1E1E2F;
+}
+
+.bg-dark {
+  background-color: #121212;
+}
+
+.text-white {
+  color: #FFFFFF;
+}
+
+.text-dark-blue {
+  color: #1E1E2F;
+}
+
+.bg-teal {
+  background-color: #00C896;
+}
+
+.hover\:bg-gold:hover {
+  background-color: #FFD700;
+}
+
+.hover\:text-teal:hover {
+  color: #00C896;
+}

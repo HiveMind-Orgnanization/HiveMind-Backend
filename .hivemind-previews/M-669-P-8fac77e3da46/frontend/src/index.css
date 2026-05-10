@@ -1,0 +1,104 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+
+body {
+  font-family: 'Inter', sans-serif;
+  margin: 0;
+  padding: 0;
+  background-color: #121212;
+  color: #FFFFFF;
+}
+
+.bg-dark-blue {
+  background-color: #1E1E2F;
+}
+
+.bg-dark {
+  background-color: #121212;
+}
+
+.text-white {
+  color: #FFFFFF;
+}
+
+.text-dark-blue {
+  color: #1E1E2F;
+}
+
+.bg-teal {
+  background-color: #00C896;
+}
+
+.hover\:bg-gold:hover {
+  background-color: #FFD700;
+}
+
+.hover\:text-teal:hover {
+  color: #00C896;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+.section {
+  padding: 60px 0;
+}
+
+.text-center {
+  text-align: center;
+}
+
+.button {
+  display: inline-block;
+  padding: 12px 24px;
+  font-size: 16px;
+  font-weight: bold;
+  border-radius: 8px;
+  transition: background-color 0.3s ease;
+}
+
+.button-primary {
+  background-color: #00C896;
+  color: #1E1E2F;
+}
+
+.button-primary:hover {
+  background-color: #FFD700;
+}
+
+.grid {
+  display: grid;
+  gap: 20px;
+}
+
+.grid-cols-1 {
+  grid-template-columns: repeat(1, 1fr);
+}
+
+.md\:grid-cols-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.shadow-lg {
+  box-shadow: 0 10px 15px rgba(0, 0, 0, 0.1);
+}
+
+.rounded-lg {
+  border-radius: 12px;
+}
+
+.drop-shadow-lg {
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.1));
+}
+
+.drop-shadow-md {
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.1));
+}
+
+@media (min-width: 768px) {
+  .md\:grid-cols-3 {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
