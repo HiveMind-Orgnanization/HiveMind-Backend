@@ -44,6 +44,22 @@ setInterval(() => {
   for (const [k, v] of swarmJobs) if (v.startedAt < cutoff) swarmJobs.delete(k);
 }, 10 * 60 * 1000).unref();
 
+/** Background preview-build job state (npm install + vite build can take 1-5 min on EB). */
+type PreviewJob = {
+  status: "running" | "done" | "failed";
+  wallet: string;
+  missionId: string;
+  startedAt: number;
+  sessionId?: string;
+  url?: string;
+  error?: string;
+};
+const previewJobs = new Map<string, PreviewJob>();
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60_000;
+  for (const [k, v] of previewJobs) if (v.startedAt < cutoff && v.status !== "running") previewJobs.delete(k);
+}, 5 * 60_000).unref();
+
 const budgetAllocationSchema = z.object({
   agentCompute: z.number().min(0).max(1),
   tokenUsage: z.number().min(0).max(1),
@@ -732,6 +748,30 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
    * POST /api/missions/:id/preview/start
    * Materialize artifacts → build → run frontend+backend, then expose via /preview/:sessionId/.
    */
+  /** Run mgr.start in the background and update previewJobs as it progresses. Used by both
+   *  the async (202 + jobId) and legacy synchronous start endpoints. */
+  const runPreviewBuildInBackground = async (
+    jobId: string,
+    wallet: string,
+    missionId: string,
+    latest: Array<{ path: string; content: string }>,
+  ): Promise<void> => {
+    try {
+      const mgr = previewManager();
+      const session = await mgr.start({ wallet, missionId, artifacts: latest });
+      const url = `/preview/${session.id}/`;
+      previewJobs.set(jobId, { status: "done", wallet, missionId, startedAt: Date.now(), sessionId: session.id, url });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      previewJobs.set(jobId, { status: "failed", wallet, missionId, startedAt: Date.now(), error: msg.slice(0, 2000) });
+    }
+  };
+
+  /** POST /api/missions/:id/preview/start — async. Returns 202 + jobId immediately, runs
+   *  npm install + vite build in the background, frontend (or expired-page JS) polls
+   *  /preview/status/:jobId. Synchronous run is preserved when `?sync=1` is set so callers
+   *  who can tolerate a long-lived connection (none in production — Vercel kills at 30s) keep
+   *  working. */
   app.post("/api/missions/:id/preview/start", async (req, reply) => {
     let wallet: string;
     try {
@@ -748,15 +788,25 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       const prev = byPath.get(a.path);
       if (!prev || a.createdAt > prev.createdAt) byPath.set(a.path, a);
     }
-    const latest = [...byPath.values()];
+    const latest = [...byPath.values()].map((a) => ({ path: a.path, content: a.content }));
     if (latest.length === 0) return reply.status(404).send({ error: "no_artifacts" });
+
+    // Async path (default): kick off, return jobId, poll. This is what real clients use —
+    // the synchronous one below gets killed by Vercel at 30s.
+    const wantsAsync = (req.query as Record<string, string> | undefined)?.sync !== "1";
+    if (wantsAsync) {
+      const jobId = `prev-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      previewJobs.set(jobId, { status: "running", wallet, missionId: id, startedAt: Date.now() });
+      void reply.status(202).send({ jobId, status: "running" });
+      void runPreviewBuildInBackground(jobId, wallet, id, latest);
+      return;
+    }
+
+    // Legacy synchronous path — kept for internal scripts / curl users who can wait. Will
+    // exceed the 30 s edge timeout on Vercel and is not used by the SPA or the expired page.
     try {
       const mgr = previewManager();
-      const session = await mgr.start({
-        wallet,
-        missionId: id,
-        artifacts: latest.map((a) => ({ path: a.path, content: a.content })),
-      });
+      const session = await mgr.start({ wallet, missionId: id, artifacts: latest });
       const url = `/preview/${session.id}/`;
       return { ok: true as const, sessionId: session.id, url };
     } catch (e) {
@@ -771,6 +821,27 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
           `Detail: ${safe}`,
       });
     }
+  });
+
+  /** GET /api/missions/:id/preview/status/:jobId — poll preview-build status. */
+  app.get("/api/missions/:id/preview/status/:jobId", async (req, reply) => {
+    let wallet: string;
+    try {
+      wallet = requireWallet(req);
+    } catch (e) {
+      const err = e as { statusCode?: number };
+      return reply.status(err.statusCode ?? 401).send({ error: "unauthorized" });
+    }
+    const { id, jobId } = req.params as { id: string; jobId: string };
+    const job = previewJobs.get(jobId);
+    if (!job) return reply.status(404).send({ error: "not_found", message: "Preview job expired or never existed." });
+    if (job.wallet !== wallet || job.missionId !== id) return reply.status(403).send({ error: "forbidden" });
+    return {
+      status: job.status,
+      sessionId: job.sessionId ?? null,
+      url: job.url ?? null,
+      error: job.error ?? null,
+    };
   });
 
   /**
@@ -871,38 +942,77 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       safeMission
         ? `<script>
 (function(){
+  var MISSION = ${JSON.stringify(safeMission)};
   var btn = document.getElementById('rebuild');
   var status = document.getElementById('status');
   if (!btn || !status) return;
+  function setProgress(html, color) {
+    status.innerHTML = '<p style="color:' + (color || '#67e8f9') + '">' +
+      '<span class="spinner"></span>' + html + '</p>';
+  }
+  function setError(detail) {
+    status.innerHTML = '<div class="err">' + String(detail).replace(/[<>]/g, '') + '</div>' +
+      '<p class="muted">Open <a style="color:#67e8f9" href="/agents?mission=' + encodeURIComponent(MISSION) + '">the workspace</a> and ask the swarm in chat to fix the build error.</p>';
+    btn.disabled = false;
+  }
+  function pollStatus(jwt, jobId, started) {
+    var elapsed = Math.round((Date.now() - started) / 1000);
+    setProgress('Rebuilding — npm install + vite build (' + elapsed + 's elapsed; usually 1-5 min)…');
+    fetch('/api/missions/' + encodeURIComponent(MISSION) + '/preview/status/' + encodeURIComponent(jobId), {
+      headers: { 'Authorization': 'Bearer ' + jwt },
+    }).then(function(r){
+      if (r.status === 401 || r.status === 403) { setError('Session expired — sign in again.'); return; }
+      if (r.status === 404) { setError('Preview job no longer exists — try again.'); return; }
+      return r.json();
+    }).then(function(j){
+      if (!j) return;
+      if (j.status === 'done' && j.url) {
+        status.innerHTML = '<p style="color:#86efac">Preview ready — loading…</p>';
+        window.location.href = j.url;
+        return;
+      }
+      if (j.status === 'failed') {
+        setError(j.error || 'Build failed.');
+        return;
+      }
+      // Still running — poll again.
+      setTimeout(function(){ pollStatus(jwt, jobId, started); }, 4000);
+    }).catch(function(e){
+      // Transient network blip — retry once more before surfacing.
+      setTimeout(function(){ pollStatus(jwt, jobId, started); }, 5000);
+    });
+  }
   btn.addEventListener('click', function(){
     btn.disabled = true;
-    status.innerHTML = '<p style="color:#67e8f9"><span class="spinner"></span>Rebuilding — the swarm runs npm install + vite build, this can take 2-5 minutes…</p>';
+    setProgress('Starting the rebuild…');
     var jwt = null;
     try { jwt = localStorage.getItem('hm_jwt'); } catch (e) {}
     if (!jwt) {
-      status.innerHTML = '<p style="color:#fca5a5">Sign in with your wallet first. <a style="color:#67e8f9" href="/agents?mission=${safeMission}&autoHost=1">Open the workspace to sign in</a>.</p>';
+      status.innerHTML = '<p style="color:#fca5a5">Sign in with your wallet first. ' +
+        '<a style="color:#67e8f9" href="/agents?mission=' + encodeURIComponent(MISSION) + '&autoHost=1">Open the workspace to sign in</a>.</p>';
       btn.disabled = false;
       return;
     }
-    fetch('/api/missions/${safeMission}/preview/start', {
+    fetch('/api/missions/' + encodeURIComponent(MISSION) + '/preview/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + jwt },
       body: '{}',
     }).then(function(r){
-      return r.json().then(function(j){ return { ok: r.ok, status: r.status, body: j }; });
+      return r.json().then(function(j){ return { ok: r.ok || r.status === 202, status: r.status, body: j }; });
     }).then(function(res){
+      if (res.ok && res.body && res.body.jobId) {
+        pollStatus(jwt, res.body.jobId, Date.now());
+        return;
+      }
+      // Legacy sync response (older backend) — { ok, url }.
       if (res.ok && res.body && res.body.url) {
         status.innerHTML = '<p style="color:#86efac">Preview ready — loading…</p>';
         window.location.href = res.body.url;
         return;
       }
-      var detail = (res.body && (res.body.message || res.body.error)) || ('HTTP ' + res.status);
-      status.innerHTML = '<div class="err">' + String(detail).replace(/[<>]/g, '') + '</div>' +
-        '<p class="muted">Try <a style="color:#67e8f9" href="/agents?mission=${safeMission}">opening the workspace</a> and asking the swarm in chat to fix the build error.</p>';
-      btn.disabled = false;
+      setError((res.body && (res.body.message || res.body.error)) || ('HTTP ' + res.status));
     }).catch(function(e){
-      status.innerHTML = '<div class="err">' + String((e && e.message) || e).replace(/[<>]/g, '') + '</div>';
-      btn.disabled = false;
+      setError((e && e.message) || e);
     });
   });
 })();
