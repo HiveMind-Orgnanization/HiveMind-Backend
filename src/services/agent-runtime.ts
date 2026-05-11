@@ -336,11 +336,17 @@ export async function invokeAgentCompletion(
     // gpt-5.x burns ~30% of max_completion_tokens on hidden reasoning by default,
     // starving the actual output budget. Probed empirically: with reasoning_effort:"none"
     // a 100+ line snake game returns in 29s vs 110s with the default; 0 reasoning tokens
-    // vs ~2.5k. Codegen roles → none (full budget for code). Strategy/Research/etc → low.
+    // vs ~2.5k. Any task that must produce file artifacts gets "none" so the full token
+    // budget goes to actual content — otherwise (Strategy/Research advisory text) keep "low".
     // Reasoning models (o1/o3/o4) don't accept this parameter at all.
+    const isCodegenRole =
+      agent.specialization === "Development"
+      || agent.specialization === "Coordination"
+      || agent.specialization === "Design";
+    const isArtifactTask = Boolean(invokeOpts?.persistArtifactUpdates || invokeOpts?.swarmArtifactStep);
     const reasoningEffort: "none" | "low" | undefined = !/^gpt-5/i.test(pickedModel)
       ? undefined
-      : (agent.specialization === "Development" || agent.specialization === "Coordination" || agent.specialization === "Design")
+      : (isCodegenRole || isArtifactTask)
         ? "none"
         : "low";
 
