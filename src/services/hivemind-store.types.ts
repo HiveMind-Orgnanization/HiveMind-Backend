@@ -15,9 +15,11 @@ export interface HiveMindStore {
   createChallenge(wallet: string): Promise<AuthChallenge>;
   consumeChallenge(wallet: string): Promise<AuthChallenge | undefined>;
 
-  listMissions(): Promise<Mission[]>;
+  /** Pass a wallet pubkey to scope the result to that owner; omit for admin-style global list. */
+  listMissions(wallet?: string): Promise<Mission[]>;
   getMission(id: string): Promise<Mission | undefined>;
-  createMission(input: Omit<Mission, "id" | "createdAt">): Promise<Mission>;
+  /** Pass `wallet` so the row is tagged with its creator — required for per-wallet filtering. */
+  createMission(input: Omit<Mission, "id" | "createdAt"> & { wallet?: string }): Promise<Mission>;
   patchMission(id: string, patch: Partial<Mission>): Promise<Mission | undefined>;
   deleteMission(id: string): Promise<boolean>;
 

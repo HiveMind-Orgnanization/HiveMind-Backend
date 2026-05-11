@@ -109,16 +109,18 @@ export class MemoryHiveMindStore implements HiveMindStore {
     return ch;
   }
 
-  async listMissions(): Promise<Mission[]> {
-    return Promise.resolve([...this.missions].sort((a, b) => b.createdAt - a.createdAt));
+  async listMissions(wallet?: string): Promise<Mission[]> {
+    const all = [...this.missions].sort((a, b) => b.createdAt - a.createdAt);
+    if (!wallet) return all;
+    return all.filter((m) => (m as Mission & { wallet?: string }).wallet === wallet);
   }
 
   async getMission(id: string): Promise<Mission | undefined> {
     return Promise.resolve(this.missions.find((m) => m.id === id));
   }
 
-  async createMission(input: Omit<Mission, "id" | "createdAt">): Promise<Mission> {
-    const m: Mission = {
+  async createMission(input: Omit<Mission, "id" | "createdAt"> & { wallet?: string }): Promise<Mission> {
+    const m: Mission & { wallet?: string } = {
       ...input,
       id: missionId(),
       createdAt: Date.now(),

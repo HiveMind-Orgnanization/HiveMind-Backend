@@ -86,6 +86,8 @@ async function migrate(client: PoolClient): Promise<void> {
 
   await client.query(`
     ALTER TABLE missions ADD COLUMN IF NOT EXISTS config JSONB NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE missions ADD COLUMN IF NOT EXISTS wallet TEXT;
+    CREATE INDEX IF NOT EXISTS idx_missions_wallet ON missions (wallet);
   `);
 
   await client.query(`
@@ -137,7 +139,7 @@ function rowMission(r: Record<string, unknown>): Mission {
     : typeof agents === "string"
       ? (JSON.parse(agents) as string[])
       : [];
-  const base: Mission = {
+  const base: Mission & { wallet?: string } = {
     id: String(r.id),
     title: String(r.title),
     objective: String(r.objective),
@@ -150,6 +152,7 @@ function rowMission(r: Record<string, unknown>): Mission {
     createdAt: Number(r.created_at),
     eta: String(r.eta ?? "—"),
     confidence: Number(r.confidence ?? 80),
+    ...(r.wallet ? { wallet: String(r.wallet) } : {}),
   };
   const cfg = parseMissionConfig(r.config);
   return cfg ? { ...base, config: cfg } : base;
@@ -420,7 +423,14 @@ export class PostgresHiveMindStore implements HiveMindStore {
     };
   }
 
-  async listMissions(): Promise<Mission[]> {
+  async listMissions(wallet?: string): Promise<Mission[]> {
+    if (wallet) {
+      const { rows } = await this.pool.query(
+        "SELECT * FROM missions WHERE wallet = $1 ORDER BY created_at DESC",
+        [wallet],
+      );
+      return rows.map((row) => rowMission(row as Record<string, unknown>));
+    }
     const { rows } = await this.pool.query(
       "SELECT * FROM missions ORDER BY created_at DESC",
     );
@@ -433,12 +443,12 @@ export class PostgresHiveMindStore implements HiveMindStore {
     return r ? rowMission(r) : undefined;
   }
 
-  async createMission(input: Omit<Mission, "id" | "createdAt">): Promise<Mission> {
+  async createMission(input: Omit<Mission, "id" | "createdAt"> & { wallet?: string }): Promise<Mission> {
     const id = missionId();
     const createdAt = Date.now();
     await this.pool.query(
-      `INSERT INTO missions (id, title, objective, priority, status, agents, budget, cost, progress, created_at, eta, confidence, config)
-       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13::jsonb)`,
+      `INSERT INTO missions (id, title, objective, priority, status, agents, budget, cost, progress, created_at, eta, confidence, config, wallet)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13::jsonb,$14)`,
       [
         id,
         input.title,
@@ -453,6 +463,7 @@ export class PostgresHiveMindStore implements HiveMindStore {
         input.eta,
         input.confidence,
         JSON.stringify(input.config ?? {}),
+        input.wallet ?? null,
       ],
     );
     return {

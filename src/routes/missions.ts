@@ -559,9 +559,18 @@ function verifySwarmDeliverables(
 }
 
 export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg?: AppConfig) {
-  app.get("/api/missions", async () => ({
-    missions: await hivemindStore().listMissions(),
-  }));
+  app.get("/api/missions", async (req, reply) => {
+    let wallet: string;
+    try {
+      wallet = requireWallet(req);
+    } catch (e) {
+      const err = e as { statusCode?: number };
+      return reply.status(err.statusCode ?? 401).send({ error: "unauthorized" });
+    }
+    // Per-wallet scoping: only return missions this wallet created. Previously the endpoint
+    // returned every mission globally → any connected wallet saw missions from other users.
+    return { missions: await hivemindStore().listMissions(wallet) };
+  });
 
   app.get("/api/missions/:id/live-metrics", async (req, reply) => {
     const id = (req.params as { id: string }).id;
@@ -2362,22 +2371,35 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
   });
 
   app.get("/api/missions/:id", async (req, reply) => {
+    let wallet: string;
+    try {
+      wallet = requireWallet(req);
+    } catch (e) {
+      const err = e as { statusCode?: number };
+      return reply.status(err.statusCode ?? 401).send({ error: "unauthorized" });
+    }
     const id = (req.params as { id: string }).id;
     const m = await hivemindStore().getMission(id);
     if (!m) return reply.status(404).send({ error: "not_found" });
+    // Per-wallet scoping: a different wallet shouldn't see this mission's title/objective by id.
+    const owner = (m as typeof m & { wallet?: string }).wallet;
+    if (owner && owner !== wallet) return reply.status(404).send({ error: "not_found" });
     return m;
   });
 
   app.post("/api/missions", async (req, reply) => {
+    let wallet: string;
     try {
-      requireWallet(req);
+      wallet = requireWallet(req);
     } catch (e) {
       const err = e as { statusCode?: number };
       return reply.status(err.statusCode ?? 401).send({ error: "unauthorized" });
     }
     const parsed = createMission.safeParse(req.body);
     if (!parsed.success) return reply.status(400).send({ error: "invalid_body", details: parsed.error.flatten() });
-    const m = await hivemindStore().createMission(parsed.data);
+    // Tag the mission with the creator's wallet so listMissions can filter — otherwise
+    // every wallet sees every mission ever created (cross-tenant data leak).
+    const m = await hivemindStore().createMission({ ...parsed.data, wallet });
     hub.broadcast({ type: "mission.created", payload: m }, `mission:${m.id}`);
     hub.broadcast({ type: "mission.created", payload: m }, "global");
     return m;
