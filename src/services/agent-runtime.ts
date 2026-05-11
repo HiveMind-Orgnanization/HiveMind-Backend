@@ -333,16 +333,51 @@ export async function invokeAgentCompletion(
           { role: "user", content: userMessage.slice(0, userCap) },
         ];
 
-    const resp = await client.chat.completions.create({
+    // gpt-5.x burns ~30% of max_completion_tokens on hidden reasoning by default,
+    // starving the actual output budget. Probed empirically: with reasoning_effort:"none"
+    // a 100+ line snake game returns in 29s vs 110s with the default; 0 reasoning tokens
+    // vs ~2.5k. Codegen roles → none (full budget for code). Strategy/Research/etc → low.
+    // Reasoning models (o1/o3/o4) don't accept this parameter at all.
+    const reasoningEffort: "none" | "low" | undefined = !/^gpt-5/i.test(pickedModel)
+      ? undefined
+      : (agent.specialization === "Development" || agent.specialization === "Coordination" || agent.specialization === "Design")
+        ? "none"
+        : "low";
+
+    const baseParams: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = {
       model: pickedModel,
       messages,
       ...(useCompletionTokens
         ? { max_completion_tokens: maxTok }
         : { max_tokens: maxTok }),
       ...(reasoning ? {} : { temperature: lowTempStructured ? 0.2 : 0.35 }),
-    });
-    const reply =
-      resp.choices?.[0]?.message?.content?.trim() ?? "(empty model response)";
+    };
+    // `reasoning_effort` is a real OpenAI param for gpt-5.x but isn't surfaced in this
+    // SDK version's typings — attach via cast so the field still flows through.
+    const params = reasoningEffort
+      ? ({ ...baseParams, reasoning_effort: reasoningEffort } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming)
+      : baseParams;
+    const resp = await client.chat.completions.create(params);
+    const choice = resp.choices?.[0];
+    const finish = choice?.finish_reason;
+    const reply = choice?.message?.content?.trim() ?? "(empty model response)";
+    // Truncated by token budget: surface to caller so the repair loop / chat UX
+    // can react ("response was cut off — agent will continue"). Avoid the silent
+    // mid-stream cut-off that produced files like `import Snake from './` last run.
+    if (finish === "length") {
+      const usage = (resp as { usage?: { completion_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } } }).usage;
+      const c = usage?.completion_tokens ?? 0;
+      const r = usage?.completion_tokens_details?.reasoning_tokens ?? 0;
+      console.warn(
+        `[hivemind] OpenAI truncated reply (finish_reason=length) model=${pickedModel} budget=${maxTok} completion_tokens=${c} reasoning_tokens=${r} role=${agent.specialization}`,
+      );
+      return {
+        reply,
+        provider: "openai",
+        model: pickedModel,
+        llmFailure: `truncated_at_${maxTok}_tokens`,
+      };
+    }
     return { reply, provider: "openai", model: pickedModel };
   };
 
