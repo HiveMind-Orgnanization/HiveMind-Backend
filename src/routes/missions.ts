@@ -1208,7 +1208,7 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
             "2. Every `import X from './path'` → the file at ./path.tsx (or .ts/.js) exists in your artifacts.",
             "3. No duplicate default exports in a single file.",
             "4. No `import React from 'react'` in files that use JSX with Vite (use `import { ... } from 'react'` or nothing — Vite's JSX transform is automatic).",
-            "5. All packages you use must be listed in package.json. Common omissions that break builds: lucide-react, framer-motion, recharts, zustand, phaser, socket.io-client, @radix-ui/* — add them explicitly.",
+            "5. All packages you use must be listed in package.json. CRITICAL package name rules: use `lucide-react` (NOT `@lucide/react` — that package does NOT exist). Common omissions: framer-motion, recharts, zustand, phaser, socket.io-client, @radix-ui/* — add them explicitly.",
             "6. frontend/tsconfig.json must include `\"skipLibCheck\": true` and `\"jsx\": \"react-jsx\"`.",
             "If any item above is wrong, the Vite build WILL fail and you will be asked to repair it. Fix it now.",
             "",

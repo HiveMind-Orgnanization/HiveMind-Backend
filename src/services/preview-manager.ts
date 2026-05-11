@@ -190,6 +190,57 @@ async function normalizeLegacyViteFrontendPackageJson(
 }
 
 /**
+ * LLMs frequently hallucinate incorrect npm package names (e.g. `@lucide/react` instead of
+ * `lucide-react`). Fix known aliases before install so pnpm doesn't 404.
+ */
+const PKG_NAME_ALIASES: Record<string, string> = {
+  "@lucide/react": "lucide-react",
+  "lucide/react": "lucide-react",
+  "@radix/react-icons": "@radix-ui/react-icons",
+  "@heroicons/react": "heroicons",           // heroicons is the correct name
+  "react-icons/fi": "react-icons",
+  "react-icons/ri": "react-icons",
+  "@emotion/css": "@emotion/react",
+  "framer": "framer-motion",
+  "@tanstack/react-query-devtools": "@tanstack/react-query",
+  "react-query": "@tanstack/react-query",     // v5 renamed
+  "swr/infinite": "swr",
+  "zustand/middleware": "zustand",
+  "@shadcn/ui": "",                           // not a real package — remove it
+  "shadcn-ui": "",
+  "class-variance-authority/dist/types": "class-variance-authority",
+};
+
+async function normalizePackageNames(frontendDir: string): Promise<void> {
+  const pkgPath = path.join(frontendDir, "package.json");
+  let raw: string;
+  try { raw = await readFile(pkgPath, "utf8"); } catch { return; }
+  let pkg: Record<string, unknown>;
+  try { pkg = JSON.parse(raw) as Record<string, unknown>; } catch { return; }
+
+  let changed = false;
+  for (const section of ["dependencies", "devDependencies", "peerDependencies"] as const) {
+    const block = pkg[section] as Record<string, string> | undefined;
+    if (!block) continue;
+    for (const [wrong, correct] of Object.entries(PKG_NAME_ALIASES)) {
+      if (!(wrong in block)) continue;
+      const ver = block[wrong]!;
+      delete block[wrong];
+      if (correct) block[correct] = block[correct] ?? ver; // keep existing ver if already present
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
+    // Delete lock file so reinstall picks up renamed deps
+    for (const lock of ["pnpm-lock.yaml", "package-lock.json", "yarn.lock"]) {
+      await unlink(path.join(frontendDir, lock)).catch(() => {});
+    }
+  }
+}
+
+/**
  * Tailwind v4 removed the PostCSS-plugin approach entirely — `require('tailwindcss')` in
  * postcss.config.js throws at build time if tailwindcss@4 is installed.
  * LLMs often generate v3-style config but pin `tailwindcss: "latest"` (→ v4 now).
@@ -1134,6 +1185,7 @@ export class PreviewManager {
         }
       }
 
+      await normalizePackageNames(frontendDir);
       await normalizeLegacyViteFrontendPackageJson(frontendDir);
       await normalizeTailwindForBuild(frontendDir);
       await normalizeTsConfigForBuild(frontendDir);
@@ -1274,6 +1326,8 @@ export class PreviewManager {
       stdio: "pipe",
     });
 
+    // Fix AI-hallucinated package names (e.g. @lucide/react → lucide-react).
+    await normalizePackageNames(frontendDir);
     // Align ancient Vite 2/3 stacks before install — avoids `vite.createFilter is not a function` during config load.
     await normalizeLegacyViteFrontendPackageJson(frontendDir);
     // Pin Tailwind to v3 when v3 CSS syntax is used (v4 removed postcss plugin approach).
