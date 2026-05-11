@@ -392,27 +392,37 @@ async function normalizeTailwindForBuild(frontendDir: string): Promise<void> {
     }
   }
 
-  // Ensure postcss.config.js exists and uses v3 plugin when v3 directives present
+  // Ensure postcss.config exists when v3 directives present. We FORCE-write `.cjs` (CommonJS)
+  // and delete any other variants the agent may have shipped — that bypasses the ESM/CJS
+  // mismatch error Vite throws when `postcss.config.js` uses `export default` while package.json
+  // has no `"type": "module"` (or vice versa). The .cjs extension is unambiguous to Node.
   if (hasV3Directives && !usingV4TailwindVite) {
-    const postcssConfigs = ["postcss.config.js", "postcss.config.cjs", "postcss.config.ts"];
-    const hasPostcss = (await Promise.all(postcssConfigs.map((f) => fileExists(path.join(frontendDir, f))))).some(Boolean);
-    if (!hasPostcss) {
-      await writeFile(
-        path.join(frontendDir, "postcss.config.js"),
-        `module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } };\n`,
-        "utf8",
-      );
+    for (const stale of ["postcss.config.js", "postcss.config.mjs", "postcss.config.ts"]) {
+      await unlink(path.join(frontendDir, stale)).catch(() => {});
     }
-    // Ensure tailwind.config.ts exists
-    const twConfigs = ["tailwind.config.ts", "tailwind.config.js", "tailwind.config.cjs"];
-    const hasTwConfig = (await Promise.all(twConfigs.map((f) => fileExists(path.join(frontendDir, f))))).some(Boolean);
-    if (!hasTwConfig) {
-      await writeFile(
-        path.join(frontendDir, "tailwind.config.ts"),
-        `import type { Config } from 'tailwindcss';\nexport default { content: ['./index.html', './src/**/*.{ts,tsx,js,jsx}'], theme: { extend: {} }, plugins: [] } satisfies Config;\n`,
-        "utf8",
-      );
+    await writeFile(
+      path.join(frontendDir, "postcss.config.cjs"),
+      `module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } };\n`,
+      "utf8",
+    );
+    // Same rationale for tailwind.config — write `.cjs` so it's portable across both
+    // `"type": "module"` and CJS package roots.
+    for (const stale of ["tailwind.config.js", "tailwind.config.ts", "tailwind.config.mjs"]) {
+      await unlink(path.join(frontendDir, stale)).catch(() => {});
     }
+    await writeFile(
+      path.join(frontendDir, "tailwind.config.cjs"),
+      [
+        "/** @type {import('tailwindcss').Config} */",
+        "module.exports = {",
+        "  content: ['./index.html', './src/**/*.{ts,tsx,js,jsx}'],",
+        "  theme: { extend: {} },",
+        "  plugins: [],",
+        "};",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
   }
 
   // Case 2: v4 import style but @tailwindcss/vite missing from devDeps
@@ -1488,12 +1498,19 @@ export class PreviewManager {
           continue;
         }
       }
-      // 3) JSX in .js file — convert to .jsx and retry.
+      // 3) PostCSS / Tailwind config failed to load — usually an ESM/CJS mismatch in the
+      //    agent-generated postcss.config.js (export default vs module.exports). Re-run
+      //    normalizeTailwindForBuild to force a clean `.cjs` rewrite, then retry.
+      if (/postcss\.config|tailwind\.config|require\(.*tailwindcss/i.test(result.combined)) {
+        await normalizeTailwindForBuild(frontendDir);
+        continue;
+      }
+      // 4) JSX in .js file — convert to .jsx and retry.
       if (/Unexpected token|esbuild/i.test(result.combined)) {
         const jsx = await convertJsxJsToJsx(frontendDir);
         if (jsx.converted > 0) continue;
       }
-      // 4) Nothing left to auto-heal — stop retrying.
+      // 5) Nothing left to auto-heal — stop retrying.
       break;
     }
     if (lastBuildErr !== undefined) {
