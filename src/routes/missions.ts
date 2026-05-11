@@ -823,10 +823,11 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
     return m && m[1] ? m[1].replace(/_/g, "-") : null;
   };
 
-  /** Friendly HTML for expired/broken preview sessions so users see something useful (and the
-   * response isn't cacheable by intermediaries that fall through to the SPA 404). When the
-   * session id encodes a mission id (newer format), the rebuild button links directly to that
-   * mission with an autoHost=1 hint so the workspace can re-trigger Host on landing. */
+  /** Friendly HTML for expired/broken preview sessions. When the session id carries a mission
+   *  id, the page rebuilds the preview IN-PLACE: fetch /api/missions/:id/preview/start from
+   *  this same origin (the JWT lives in localStorage under "hm_jwt" because both the SPA and
+   *  this page share hivemind.0xo.in), show progress, then redirect to the new preview URL.
+   *  No navigation to the workspace required — the user stays on this tab. */
   const previewExpiredHtml = (sessionId: string, reason: "not_found" | "unreachable"): string => {
     const heading = reason === "not_found" ? "Preview not available" : "Preview expired";
     const body =
@@ -834,10 +835,8 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
         ? `Session <code>${sessionId}</code> doesn’t exist on this server. It may have been cleaned up after a deploy or restart.`
         : `The build server for session <code>${sessionId}</code> isn’t responding. The session ended after a server restart.`;
     const missionId = missionIdFromSessionId(sessionId);
-    const workspaceHref = missionId
-      ? `/agents?mission=${encodeURIComponent(missionId)}&autoHost=1`
-      : "/agents";
-    const workspaceLabel = missionId ? "Rebuild this preview" : "Open Agent Workspace";
+    // Escape for HTML / JS string contexts (missionId comes from the URL path, so theoretically attacker-controlled).
+    const safeMission = missionId ? missionId.replace(/[^A-Za-z0-9_-]/g, "") : "";
     return [
       "<!doctype html>",
       "<html lang=\"en\"><head><meta charset=\"utf-8\">",
@@ -845,19 +844,71 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       `<title>${heading} — HiveMind</title>`,
       "<style>",
       "html,body{margin:0;height:100%;background:#04060c;color:#e6edf6;font:14px/1.55 ui-sans-serif,system-ui,-apple-system}",
-      ".wrap{max-width:480px;margin:18vh auto;padding:24px;text-align:center}",
+      ".wrap{max-width:520px;margin:14vh auto;padding:24px;text-align:center}",
       "h1{font-size:18px;margin:0 0 8px;color:#67e8f9}",
-      "p{color:#94a3b8;margin:0 0 18px}",
+      "p{color:#94a3b8;margin:0 0 14px}",
       "code{background:#0a1220;color:#a5f3fc;padding:1px 5px;border-radius:4px;font-family:ui-monospace,monospace;font-size:12px}",
-      "a{display:inline-block;margin-top:6px;padding:9px 20px;border:1px solid #22d3ee55;border-radius:8px;color:#67e8f9;text-decoration:none;font-weight:500;background:#22d3ee0c}",
-      "a:hover{background:#22d3ee20;border-color:#22d3ee99}",
+      ".btn{display:inline-block;margin-top:6px;padding:9px 20px;border:1px solid #22d3ee55;border-radius:8px;color:#67e8f9;text-decoration:none;font-weight:500;background:#22d3ee0c;cursor:pointer;font-family:inherit;font-size:13px}",
+      ".btn:hover{background:#22d3ee20;border-color:#22d3ee99}",
+      ".btn:disabled{opacity:0.55;cursor:wait}",
+      ".muted{color:#64748b;font-size:11px;margin-top:18px;font-family:ui-monospace,monospace}",
+      ".spinner{display:inline-block;width:11px;height:11px;border:2px solid #22d3ee55;border-top-color:#67e8f9;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:-1px;margin-right:6px}",
+      "@keyframes spin{to{transform:rotate(360deg)}}",
+      ".err{color:#fca5a5;font-size:12px;margin-top:14px;text-align:left;background:#1a0d10;border:1px solid #ef444444;border-radius:6px;padding:10px 12px;font-family:ui-monospace,monospace;white-space:pre-wrap;max-height:200px;overflow:auto}",
       "</style></head><body><div class=\"wrap\">",
       `<h1>${heading}</h1><p>${body}</p>`,
-      missionId
-        ? `<p>Click below to jump straight to mission <code>${missionId}</code> and rebuild the preview automatically.</p>`
+      safeMission
+        ? `<p>Click below to rebuild the preview for mission <code>${safeMission}</code> — you'll stay on this tab.</p>`
         : "<p>Open the Agent Workspace and click <strong>Host</strong> again to spawn a fresh preview.</p>",
-      `<a href="${workspaceHref}">${workspaceLabel}</a>`,
-      "</div></body></html>",
+      safeMission
+        ? `<button id="rebuild" class="btn" type="button">Rebuild this preview</button>`
+        : `<a class="btn" href="/agents">Open Agent Workspace</a>`,
+      "<div id=\"status\"></div>",
+      safeMission
+        ? `<p class="muted">If this never finishes, the wallet that built the original mission may not be signed in. Open <a style="color:#67e8f9" href="/agents?mission=${safeMission}">the workspace</a> and click Host there.</p>`
+        : "",
+      "</div>",
+      safeMission
+        ? `<script>
+(function(){
+  var btn = document.getElementById('rebuild');
+  var status = document.getElementById('status');
+  if (!btn || !status) return;
+  btn.addEventListener('click', function(){
+    btn.disabled = true;
+    status.innerHTML = '<p style="color:#67e8f9"><span class="spinner"></span>Rebuilding — the swarm runs npm install + vite build, this can take 2-5 minutes…</p>';
+    var jwt = null;
+    try { jwt = localStorage.getItem('hm_jwt'); } catch (e) {}
+    if (!jwt) {
+      status.innerHTML = '<p style="color:#fca5a5">Sign in with your wallet first. <a style="color:#67e8f9" href="/agents?mission=${safeMission}&autoHost=1">Open the workspace to sign in</a>.</p>';
+      btn.disabled = false;
+      return;
+    }
+    fetch('/api/missions/${safeMission}/preview/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + jwt },
+      body: '{}',
+    }).then(function(r){
+      return r.json().then(function(j){ return { ok: r.ok, status: r.status, body: j }; });
+    }).then(function(res){
+      if (res.ok && res.body && res.body.url) {
+        status.innerHTML = '<p style="color:#86efac">Preview ready — loading…</p>';
+        window.location.href = res.body.url;
+        return;
+      }
+      var detail = (res.body && (res.body.message || res.body.error)) || ('HTTP ' + res.status);
+      status.innerHTML = '<div class="err">' + String(detail).replace(/[<>]/g, '') + '</div>' +
+        '<p class="muted">Try <a style="color:#67e8f9" href="/agents?mission=${safeMission}">opening the workspace</a> and asking the swarm in chat to fix the build error.</p>';
+      btn.disabled = false;
+    }).catch(function(e){
+      status.innerHTML = '<div class="err">' + String((e && e.message) || e).replace(/[<>]/g, '') + '</div>';
+      btn.disabled = false;
+    });
+  });
+})();
+</script>`
+        : "",
+      "</body></html>",
     ].join("\n");
   };
 
