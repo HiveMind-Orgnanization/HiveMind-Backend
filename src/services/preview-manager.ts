@@ -246,7 +246,7 @@ async function normalizePackageNames(frontendDir: string): Promise<void> {
  * LLMs often generate v3-style config but pin `tailwindcss: "latest"` (→ v4 now).
  *
  * Fix: if the generated CSS uses v3 directives (@tailwind base / components / utilities)
- * force tailwindcss to ^3.4.21, ensure postcss.config.js exists and is correct, and
+ * force tailwindcss to ^3.4.0, ensure postcss.config.js exists and is correct, and
  * ensure tailwind.config.ts exists with a minimal content glob.
  */
 async function normalizeTailwindForBuild(frontendDir: string): Promise<void> {
@@ -307,8 +307,8 @@ async function normalizeTailwindForBuild(frontendDir: string): Promise<void> {
     (twVersion === "latest" || (specMajor !== null && specMajor >= 4));
 
   if (needsDowngrade) {
-    if (devDeps.tailwindcss) devDeps.tailwindcss = "^3.4.21";
-    else deps.tailwindcss = "^3.4.21";
+    if (devDeps.tailwindcss) devDeps.tailwindcss = "^3.4.0";
+    else deps.tailwindcss = "^3.4.0";
     // Ensure postcss + autoprefixer exist
     if (!devDeps.postcss && !deps.postcss) devDeps.postcss = "^8.4.47";
     if (!devDeps.autoprefixer && !deps.autoprefixer) devDeps.autoprefixer = "^10.4.20";
