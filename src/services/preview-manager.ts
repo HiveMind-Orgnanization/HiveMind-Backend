@@ -154,6 +154,14 @@ function viteMajorFromSpec(spec: string | undefined): number | null {
  * LLMs often pin Vite 2/3 (`vite.createFilter` missing) while plugin-react resolves badly →
  * `TypeError: vite.createFilter is not a function`. Align to maintained Vite 5 + plugin-react 4 before install.
  */
+/**
+ * Pin Vite to the well-tested 5.4.x line for preview builds.
+ * - < 5 (Vite 2/3): `vite.createFilter is not a function` at config load.
+ * - 6 / 7 / "latest": pulls in `rolldown` (Vite's new experimental bundler). On agent-generated
+ *   code, rolldown crashes with cryptic stack traces inside `rolldown-build-*.mjs`, no actionable
+ *   error message, and the auto-heal log scan finds nothing fixable. Vite 5 + Rollup is stable.
+ *   Also strip any explicit `rolldown` / `rolldown-vite` / `@rolldown/*` deps the agent injected.
+ */
 async function normalizeLegacyViteFrontendPackageJson(
   frontendDir: string,
 ): Promise<{ upgraded: boolean }> {
@@ -164,13 +172,27 @@ async function normalizeLegacyViteFrontendPackageJson(
   const viteFromDeps = pkg.dependencies?.vite;
   const viteFromDev = pkg.devDependencies?.vite;
   const viteSpec = viteFromDev ?? viteFromDeps;
-  if (!viteSpec) return { upgraded: false };
+  const major = viteSpec ? viteMajorFromSpec(viteSpec) : null;
+  // Treat "latest" / undefined as out of bounds (it floats to the current major, currently Vite 7).
+  const isOutOfRange = !viteSpec
+    || /\blatest\b/i.test(String(viteSpec))
+    || (major !== null && (major < 5 || major > 5));
 
-  const major = viteMajorFromSpec(viteSpec);
-  if (major === null || major >= 5) return { upgraded: false };
+  // Detect rolldown contamination — Vite 6+/rolldown-vite OR explicit rolldown deps.
+  const deps = (pkg.dependencies ?? {}) as Record<string, string>;
+  const devDeps = (pkg.devDependencies ?? {}) as Record<string, string>;
+  const rolldownKeys = [
+    "rolldown",
+    "rolldown-vite",
+    "@rolldown/binding",
+    "@rolldown/pluginutils",
+  ];
+  const hasRolldown = rolldownKeys.some((k) => deps[k] !== undefined || devDeps[k] !== undefined);
 
-  pkg.dependencies = { ...(pkg.dependencies ?? {}) };
-  pkg.devDependencies = { ...(pkg.devDependencies ?? {}) };
+  if (!isOutOfRange && !hasRolldown) return { upgraded: false };
+
+  pkg.dependencies = { ...deps };
+  pkg.devDependencies = { ...devDeps };
   if (pkg.dependencies.vite) delete pkg.dependencies.vite;
 
   pkg.devDependencies.vite = "^5.4.21";
@@ -179,6 +201,11 @@ async function normalizeLegacyViteFrontendPackageJson(
   if (pkg.devDependencies["@vitejs/plugin-react-swc"] ?? pkg.dependencies["@vitejs/plugin-react-swc"]) {
     pkg.devDependencies["@vitejs/plugin-react-swc"] = "^3.7.2";
     delete pkg.dependencies["@vitejs/plugin-react-swc"];
+  }
+  // Purge every rolldown variant from both dep blocks.
+  for (const k of rolldownKeys) {
+    delete pkg.dependencies[k];
+    delete pkg.devDependencies[k];
   }
 
   await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
@@ -1452,12 +1479,21 @@ export class PreviewManager {
         await runCaptured("pnpm", ["install"], frontendDir);
         continue;
       }
-      // 2) JSX in .js file — convert to .jsx and retry.
+      // 2) Rolldown contamination — clamp Vite down to 5 and reinstall. Catches the case where
+      //    the lock file or a transitive dep still resolved a rolldown-flavoured Vite.
+      if (/rolldown/i.test(result.combined)) {
+        const upgraded = await normalizeLegacyViteFrontendPackageJson(frontendDir);
+        if (upgraded.upgraded) {
+          await runCaptured("pnpm", ["install"], frontendDir);
+          continue;
+        }
+      }
+      // 3) JSX in .js file — convert to .jsx and retry.
       if (/Unexpected token|esbuild/i.test(result.combined)) {
         const jsx = await convertJsxJsToJsx(frontendDir);
         if (jsx.converted > 0) continue;
       }
-      // 3) Nothing left to auto-heal — stop retrying.
+      // 4) Nothing left to auto-heal — stop retrying.
       break;
     }
     if (lastBuildErr !== undefined) {

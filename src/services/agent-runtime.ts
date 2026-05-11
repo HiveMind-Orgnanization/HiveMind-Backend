@@ -55,6 +55,7 @@ function buildSystemPrompt(agent: AgentProfile, missionObjective?: string, opts?
         "Do not put JSX/TSX in *.js files — use .tsx or .jsx; ensure bodies match their extensions (valid TS/HTML).",
         "Never emit double-extension filenames like `index.css.tsx`, `styles.scss.tsx`, or `data.json.tsx`. The bundler will try to parse them as TypeScript and the build aborts. Use one extension that matches the body.",
         "Frontend package.json MUST include every npm package the source code imports. If your CSS uses `@tailwind base/components/utilities` or you ship a `tailwind.config.*`, add `tailwindcss`, `postcss`, `autoprefixer` to dependencies — don't ship Tailwind configs with no matching deps.",
+        "Pin `vite` to `^5.4.21` in devDependencies (NOT `^6`, `^7`, or `latest`). Vite 6/7 ships the experimental `rolldown` bundler which crashes on agent-generated React code with no useful error. Use `@vitejs/plugin-react` `^4.3.6`. Never list `rolldown`, `rolldown-vite`, or `@rolldown/*` in deps.",
         "Use repo-style paths: frontend/..., backend/..., docs/..., not a single notes/*.md dump unless the user asked for notes only.",
         "Production quality bar: ship multi-file components (never put the whole UI in one file), Tailwind utility classes for layout/spacing/color/responsive design, loading states for async ops, and error boundaries. A bare title + button is a failure.",
         "Match this mission's product and audience in naming, routes, copy — do not reuse unrelated boilerplate demos.",
