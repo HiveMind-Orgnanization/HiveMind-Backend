@@ -72,7 +72,7 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.preprocess((_v) => normalizeOptionalApiKey(process.env.OPENAI_API_KEY), z.string().optional()),
   /**
    * When set, every OpenAI-backed agent call uses this model (overrides per-mission agentModels,
-   * priority tier, and std/heavy/crit). Requires OPENAI_API_KEY. Example: gpt-5.5-long-context
+   * priority tier, and std/heavy/crit). Requires OPENAI_API_KEY. Example: gpt-5.5
    */
   OPENAI_MODEL_ALL: z.preprocess(trimOpt, z.string().optional()),
   /** OpenAI model id (e.g. gpt-4.1-mini, gpt-4o-mini). */

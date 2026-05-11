@@ -163,6 +163,24 @@ export function isOpenAiModel(model: string): boolean {
 }
 
 /**
+ * Known-bad model ids that pass the prefix regex but the OpenAI API rejects.
+ * Stale missions/agentModels saved before we corrected the IDs still reference these — the
+ * resolver substitutes the env default instead of letting the call 404.
+ */
+const KNOWN_BAD_MODEL_IDS = new Set<string>([
+  "gpt-5.5-long-context",
+  "gpt-5-long-context",
+]);
+
+function sanitizeModelOverride(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (KNOWN_BAD_MODEL_IDS.has(trimmed)) return undefined;
+  return trimmed;
+}
+
+/**
  * Reasoning models (o1, o3, o4 series) have special API requirements:
  * - Must use `max_completion_tokens` (not `max_tokens`)
  * - Do NOT support `temperature` parameter
@@ -286,52 +304,81 @@ export async function invokeAgentCompletion(
    * - invokeOpts.modelOverride: per-call when ALL is not set (e.g. mission agentModels from swarm).
    * - Else: crit > heavy > std from env.
    */
+  const sanitizedOverride = sanitizeModelOverride(invokeOpts?.modelOverride);
+  const sanitizedAll = sanitizeModelOverride(openAiAll);
   const resolvedOpenAiModel =
-    openAiAll && isOpenAiModel(openAiAll)
-      ? openAiAll
-      : invokeOpts?.modelOverride && isOpenAiModel(invokeOpts.modelOverride)
-        ? invokeOpts.modelOverride
+    sanitizedAll && isOpenAiModel(sanitizedAll)
+      ? sanitizedAll
+      : sanitizedOverride && isOpenAiModel(sanitizedOverride)
+        ? sanitizedOverride
         : priority === "crit"
           ? openAiCrit
           : useOpenAiHeavy
             ? openAiHeavy
             : openAiModel;
 
+  const callOpenAi = async (pickedModel: string): Promise<AgentInvokeResult> => {
+    const client = new OpenAI({ apiKey: openAiKey });
+    const maxTok = completionBudget(agent, pickedModel, invokeOpts);
+    const userCap = userMessageCharCap(pickedModel, invokeOpts);
+    const reasoning = isReasoningModel(pickedModel);
+    const useCompletionTokens = requiresMaxCompletionTokens(pickedModel);
+
+    // Reasoning models (o1/o3/o4) don't support system messages or temperature.
+    // Prepend system instructions into the user turn instead.
+    const messages: OpenAI.Chat.ChatCompletionMessageParam[] = reasoning
+      ? [{ role: "user", content: `${system}\n\n---\n\n${userMessage.slice(0, userCap)}` }]
+      : [
+          { role: "system", content: system },
+          { role: "user", content: userMessage.slice(0, userCap) },
+        ];
+
+    const resp = await client.chat.completions.create({
+      model: pickedModel,
+      messages,
+      ...(useCompletionTokens
+        ? { max_completion_tokens: maxTok }
+        : { max_tokens: maxTok }),
+      ...(reasoning ? {} : { temperature: lowTempStructured ? 0.2 : 0.35 }),
+    });
+    const reply =
+      resp.choices?.[0]?.message?.content?.trim() ?? "(empty model response)";
+    return { reply, provider: "openai", model: pickedModel };
+  };
+
+  /** OpenAI error indicating the model id doesn't exist on this account / API version. */
+  const isUnknownModelError = (msg: string): boolean => {
+    const m = msg.toLowerCase();
+    return (
+      m.includes("model_not_found") ||
+      m.includes("does not exist") ||
+      m.includes("the model `") ||
+      m.includes("invalid model") ||
+      m.includes("unknown model")
+    );
+  };
+
   const tryOpenAi = async (reasonPrefix: string): Promise<AgentInvokeResult | null> => {
     if (!openAiKey) return null;
     try {
-      const pickedModel = resolvedOpenAiModel;
-      const client = new OpenAI({ apiKey: openAiKey });
-      const maxTok = completionBudget(agent, pickedModel, invokeOpts);
-      const userCap = userMessageCharCap(pickedModel, invokeOpts);
-      const reasoning = isReasoningModel(pickedModel);
-      const useCompletionTokens = requiresMaxCompletionTokens(pickedModel);
-
-      // Reasoning models (o1/o3/o4) don't support system messages or temperature.
-      // Prepend system instructions into the user turn instead.
-      const messages: OpenAI.Chat.ChatCompletionMessageParam[] = reasoning
-        ? [{ role: "user", content: `${system}\n\n---\n\n${userMessage.slice(0, userCap)}` }]
-        : [
-            { role: "system", content: system },
-            { role: "user", content: userMessage.slice(0, userCap) },
-          ];
-
-      const resp = await client.chat.completions.create({
-        model: pickedModel,
-        messages,
-        // Newer and reasoning models use max_completion_tokens; legacy GPT models use max_tokens.
-        ...(useCompletionTokens
-          ? { max_completion_tokens: maxTok }
-          : { max_tokens: maxTok }),
-        // Reasoning models don't support temperature — omit it entirely.
-        ...(reasoning ? {} : { temperature: lowTempStructured ? 0.2 : 0.35 }),
-      });
-      const reply =
-        resp.choices?.[0]?.message?.content?.trim() ??
-        "(empty model response)";
-      return { reply, provider: "openai", model: pickedModel };
+      return await callOpenAi(resolvedOpenAiModel);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // If the chosen model id doesn't exist (e.g. stale `agentModels` override pointing at
+      // a retired id), retry once with the env-default model so we don't silently fall
+      // through to Groq/mock.
+      if (isUnknownModelError(msg) && resolvedOpenAiModel !== openAiModel) {
+        console.warn(
+          `[hivemind] OpenAI rejected model ${resolvedOpenAiModel} (${reasonPrefix}); retrying with env default ${openAiModel}.`,
+        );
+        try {
+          return await callOpenAi(openAiModel);
+        } catch (e2) {
+          const msg2 = e2 instanceof Error ? e2.message : String(e2);
+          console.warn(`[hivemind] OpenAI fallback to ${openAiModel} also failed:`, msg2);
+          return null;
+        }
+      }
       console.warn(`[hivemind] OpenAI call failed (${reasonPrefix}):`, msg);
       return null;
     }
