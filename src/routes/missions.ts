@@ -1431,17 +1431,36 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
     const roleInstruction = (role: string) => {
       switch (role) {
         case "Strategy":
-          return "Define protocol type, scope, core components, success criteria, and an implementation plan. Output MUST be structured bullets + a file tree proposal. Tailor scope to the mission brief (e.g. UI-only vs full stack) — do not assume a generic template.";
+          return [
+            "Think like a senior product strategist briefing the rest of the team.",
+            "Deliver: (1) **Product summary** — one paragraph, the elevator pitch. (2) **Target user + JTBD** — who and what they're hiring this for. (3) **Scope** — bullet list of in-scope features with priority (P0/P1/P2); explicitly list what's OUT of scope. (4) **Core components** — concrete subsystems each downstream agent will need. (5) **Success criteria** — measurable acceptance bar. (6) **File tree proposal** — repo skeleton the Development agent should produce. (7) **Risks + mitigations** — top 3.",
+            "Make decisive choices instead of listing options. Tailor scope to the brief (UI-only vs full-stack vs research-only vs DAO ops). Never use a generic boilerplate template.",
+          ].join("\n");
         case "Research":
-          return "Provide competitive analysis + best practices (security, audits, compliance), and recommend chain/stack choices grounded in the brief. Output MUST include risks + mitigation.";
+          return [
+            "Think like a principal analyst briefing the team before they build.",
+            "Deliver: (1) **Competitive landscape** — 3-5 direct/adjacent competitors with one-line positioning each. (2) **Best practices** — security, audits, compliance, design patterns relevant to this brief. (3) **Stack / chain recommendation** — pick one, justify in 1-2 sentences, list trade-offs. (4) **Non-obvious insight** — the thing downstream agents would otherwise miss. (5) **Risks + mitigation** — ranked by impact.",
+            "Mark every factual claim as either Cited (with a real source) or Inference. Never fabricate sources.",
+          ].join("\n");
         case "Design":
           return [
-            "Produce UI/UX spec: pages, flows, component list, and visual system — driven by this mission brief, not a generic boilerplate.",
+            "Think like a lead product designer writing a spec another developer will implement WITHOUT asking questions.",
             "Return STRICT JSON only (no markdown fences, no prose outside the JSON) with:",
             `{ "summary": string, "artifacts": [{ "path": "design/ui-spec.md", "language": "md", "content": string, "kind": "file" }] }`,
+            "The ui-spec.md MUST include, in this exact order:",
+            "  1. **Product summary** — what we're shipping, one paragraph.",
+            "  2. **Information architecture** — pages/routes with their purpose.",
+            "  3. **User flows** — for each primary flow: trigger → steps → success state.",
+            "  4. **Design tokens** — concrete Tailwind classes / CSS variables for: color palette (primary/accent/neutral/success/warning/error with hex), typography scale (font family + sizes), spacing scale, border-radius, shadow elevations, dark-mode behavior.",
+            "  5. **Component library** — each component as: `### ComponentName` + Props table (name / type / required / description) + Layout description + States (default/hover/disabled/loading/error) + Tailwind utility classes to apply + accessibility notes.",
+            "  6. **Page compositions** — for each page, the exact composition of components, layout, copy.",
+            "  7. **Responsive breakpoints** — sm/md/lg/xl behavior per page.",
+            "  8. **Micro-interactions** — hover / focus / transition timings.",
+            "Write the spec so Development can paste classNames straight from it. Be specific (`bg-cyan-500/15 text-cyan-200`) not vague (`use accent color`).",
           ].join("\n");
         case "Development":
           return [
+            "Think like a staff engineer reading the Design spec from the prior agent. Your job: turn that spec into structured, production-grade React+TypeScript code. READ THE DESIGN UI-SPEC CAREFULLY — the className strings, component names, props, and page compositions in it are the contract. Match them.",
             "You ship a runnable codebase — not a narrative. Implement the mission brief as real source files (content, stacks, and file set must follow the brief — avoid copy-pasting unrelated demo apps).",
             "Return STRICT JSON only (no markdown fences, no prose outside the JSON) with:",
             `{ "summary": string, "artifacts": [{ "path": string, "language": string, "content": string, "kind": "file" }] }`,
@@ -1489,14 +1508,27 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
             "Use react-router-dom v6 APIs only: Routes (not Switch), Route element={<Page />} (not component={Page}), Navigate (not Redirect), useNavigate (not useHistory).",
           ].join("\n");
         case "Marketing":
-          return "Go-to-market, docs/landing copy, launch checklist. Output MUST be actionable checklists grounded in this mission.";
+          return [
+            "Think like a growth lead at a hyper-growth startup. Your scope covers branding, copywriting, pitch deck, and launch — write all of them as if a real team will ship them tomorrow.",
+            "Deliver in this exact order: (1) **Brand identity** — product name (if not set), tagline, voice/tone (3 adjectives), positioning sentence (\"X is the only Y that Z\"). (2) **Landing page copy** — hero headline (8-10 words, benefit-led), subhead (1-2 sentences), primary CTA, 3-5 feature bullets with name + 1-line benefit, social-proof line, FAQ (3 Qs). (3) **Pitch deck outline** — 10 slides max: Problem / Solution / Demo / Market / Traction / Business model / Competition / Team / Ask / Vision. One sentence per slide describing the punchline. (4) **Launch campaign** — Twitter thread (5-7 tweets), Product Hunt post draft, launch-day email subject + body, 3 partner-outreach DMs. (5) **GTM checklist** — actionable T-7 / T-3 / T-0 / T+1 / T+7 tasks.",
+            "Copy must be specific and benefit-led (\"Ship a launch in 24h, not 6 weeks\"), not abstract marketing fluff (\"Empowering creators worldwide\").",
+          ].join("\n");
         case "Treasury":
-          return "Treasury / risk parameters and defaults. Output MUST include on-chain parameter suggestions and operational controls when the brief touches protocol economics.";
+          return [
+            "Think like a crypto-native CFO sizing the mission. For every allocation, give a rationale tied to runway/burn/risk, not just a percentage.",
+            "Deliver: (1) **Budget split** — concrete percentages across agent-compute / token-usage / escrow / settlement-buffer / marketing (if applicable). (2) **Treasury parameters** — for Solana missions: SOL units, multi-sig threshold, vesting schedule (if relevant), escrow program reference, fee model. (3) **Operational controls** — who can spend, rate limits, audit cadence, kill-switch conditions. (4) **Risk model** — top 3 financial risks ranked by impact, each with one mitigation.",
+            "Cite real on-chain primitives when relevant (SPL token mints, PDAs, vesting/escrow programs). Avoid hand-wavy `put money here` language.",
+          ].join("\n");
         case "Analytics":
-          return "Define KPIs, dashboards, event schema, and monitoring/alerts. Output MUST include a minimal event schema relevant to this mission.";
+          return [
+            "Think like a senior data engineer instrumenting this product on day one. Every metric needs an owner and a business outcome.",
+            "Deliver: (1) **North Star metric** — one sentence, why it captures product value. (2) **Leading indicators** — 3-5 metrics that predict the North Star, with definition + target. (3) **Event schema** — table of event_name / when_fired / properties (name, type, example), in the format Mixpanel/PostHog accept. (4) **Dashboard outline** — 4-6 charts: title + metric + segmentation + filter. (5) **Alerts** — at least 2 condition+threshold+channel triples for production health.",
+            "Distinguish vanity metrics (\"page views\") from actionable ones (\"7-day activation\"). Always pick the actionable one.",
+          ].join("\n");
         case "Coordination":
           return [
-            "You are the lead integrator — deliver the merged repo the user can run, not a meta-document.",
+            "You are the lead integrator — deliver the merged repo the user can run, not a meta-document. You don't paraphrase prior agents; you STITCH their outputs together.",
+            "Before writing your JSON, audit the prior outputs: (1) Did Strategy define a clear file tree? — match it. (2) Did Design ship design/ui-spec.md with concrete Tailwind classes? — Development must follow them; you fix mismatches. (3) Did Development declare every dep it imports? — add the missing ones to frontend/package.json. (4) Did Marketing produce launch copy? — fold it into the landing page hero. (5) Did Treasury set parameters? — surface them in README or docs.",
             "Take ALL prior agent outputs and produce the FINAL integrated deliverable as concrete files shaped by the mission brief:",
             ...(isUiPolishMission(title, objective)
               ? [
