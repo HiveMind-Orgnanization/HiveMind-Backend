@@ -817,14 +817,27 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
    * GET /preview/:sessionId/*
    * Proxies the preview frontend (built static dist server).
    */
+  /** Extract the mission id from a session id encoded as `P-<random>-m-<missionId_with_underscores>`. */
+  const missionIdFromSessionId = (sessionId: string): string | null => {
+    const m = sessionId.match(/^P-[0-9a-f]+-m-(.+)$/);
+    return m && m[1] ? m[1].replace(/_/g, "-") : null;
+  };
+
   /** Friendly HTML for expired/broken preview sessions so users see something useful (and the
-   * response isn't cacheable by intermediaries that fall through to the SPA 404). */
+   * response isn't cacheable by intermediaries that fall through to the SPA 404). When the
+   * session id encodes a mission id (newer format), the rebuild button links directly to that
+   * mission with an autoHost=1 hint so the workspace can re-trigger Host on landing. */
   const previewExpiredHtml = (sessionId: string, reason: "not_found" | "unreachable"): string => {
     const heading = reason === "not_found" ? "Preview not available" : "Preview expired";
     const body =
       reason === "not_found"
         ? `Session <code>${sessionId}</code> doesn’t exist on this server. It may have been cleaned up after a deploy or restart.`
         : `The build server for session <code>${sessionId}</code> isn’t responding. The session ended after a server restart.`;
+    const missionId = missionIdFromSessionId(sessionId);
+    const workspaceHref = missionId
+      ? `/agents?mission=${encodeURIComponent(missionId)}&autoHost=1`
+      : "/agents";
+    const workspaceLabel = missionId ? "Rebuild this preview" : "Open Agent Workspace";
     return [
       "<!doctype html>",
       "<html lang=\"en\"><head><meta charset=\"utf-8\">",
@@ -836,12 +849,14 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       "h1{font-size:18px;margin:0 0 8px;color:#67e8f9}",
       "p{color:#94a3b8;margin:0 0 18px}",
       "code{background:#0a1220;color:#a5f3fc;padding:1px 5px;border-radius:4px;font-family:ui-monospace,monospace;font-size:12px}",
-      "a{display:inline-block;margin-top:6px;padding:8px 18px;border:1px solid #22d3ee55;border-radius:8px;color:#67e8f9;text-decoration:none;font-weight:500}",
-      "a:hover{background:#22d3ee14;border-color:#22d3ee99}",
+      "a{display:inline-block;margin-top:6px;padding:9px 20px;border:1px solid #22d3ee55;border-radius:8px;color:#67e8f9;text-decoration:none;font-weight:500;background:#22d3ee0c}",
+      "a:hover{background:#22d3ee20;border-color:#22d3ee99}",
       "</style></head><body><div class=\"wrap\">",
       `<h1>${heading}</h1><p>${body}</p>`,
-      "<p>Open the Agent Workspace and click <strong>Host</strong> again to spawn a fresh preview.</p>",
-      "<a href=\"/agents\">Open Agent Workspace</a>",
+      missionId
+        ? `<p>Click below to jump straight to mission <code>${missionId}</code> and rebuild the preview automatically.</p>`
+        : "<p>Open the Agent Workspace and click <strong>Host</strong> again to spawn a fresh preview.</p>",
+      `<a href="${workspaceHref}">${workspaceLabel}</a>`,
       "</div></body></html>",
     ].join("\n");
   };

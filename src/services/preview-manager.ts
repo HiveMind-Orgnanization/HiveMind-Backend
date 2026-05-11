@@ -1389,7 +1389,12 @@ export class PreviewManager {
   }
 
   async start(input: { wallet: string; missionId: string; artifacts: PreviewArtifact[] }): Promise<PreviewSession> {
-    const id = `P-${randomBytes(6).toString("hex")}`;
+    // Encode the mission id into the session id so an expired-preview URL can still link the
+    // user back to the right mission after EB has restarted (in-memory session is gone, but
+    // the URL itself carries the mission). Mission ids like "M-625" become "M_625" (underscores
+    // round-trip through URL safely; we restore them when parsing on the static-proxy handler).
+    const slugMissionId = input.missionId.replace(/-/g, "_");
+    const id = `P-${randomBytes(6).toString("hex")}-m-${slugMissionId}`;
     await mkdir(this.baseDir, { recursive: true });
     const rootDir = path.join(this.baseDir, `${input.missionId}-${id}`);
     await mkdir(rootDir, { recursive: true });
