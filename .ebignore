@@ -4,5 +4,6 @@ node_modules
 .env
 *.log
 .hivemind-logs
+.hivemind-previews
 docker-compose.yml
 # Keep dist/ — it is compiled by the container_command in .ebextensions/01_node.config
