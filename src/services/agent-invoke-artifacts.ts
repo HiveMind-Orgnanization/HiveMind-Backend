@@ -75,20 +75,39 @@ export type ParsedPersistReply =
 
 export function stripMarkdownFence(s: string): string {
   const t = s.trim();
-  const m = /^```(?:json)?\s*\n?([\s\S]*?)\n?```$/m.exec(t);
+  // Remove outer ```json ... ``` or ``` ... ``` fences
+  const m = /^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/m.exec(t);
   if (m) return m[1]!.trim();
   return t;
 }
 
+/**
+ * Try several extraction strategies so a model that adds a small prose preamble
+ * or wraps JSON in a fence still produces usable output.
+ */
 export function parsePersistArtifactReply(raw: string): ParsedPersistReply {
-  try {
-    const j = JSON.parse(stripMarkdownFence(raw)) as unknown;
-    const r = persistSchema.safeParse(j);
-    if (!r.success) return { ok: false, error: "schema" };
-    return { ok: true, data: r.data };
-  } catch {
-    return { ok: false, error: "json" };
+  const candidates: string[] = [];
+
+  // 1. Strip outer fence first
+  const stripped = stripMarkdownFence(raw);
+  candidates.push(stripped);
+
+  // 2. Find the first '{' in the raw string — handles "Here is the fix:\n{...}"
+  const braceIdx = raw.indexOf("{");
+  if (braceIdx > 0) candidates.push(raw.slice(braceIdx).trim());
+
+  // 3. Inner fence extraction (model wraps JSON inside prose)
+  const innerFence = /```(?:json)?\s*\n([\s\S]*?)\n```/m.exec(raw);
+  if (innerFence) candidates.push(innerFence[1]!.trim());
+
+  for (const c of candidates) {
+    try {
+      const j = JSON.parse(c) as unknown;
+      const r = persistSchema.safeParse(j);
+      if (r.success) return { ok: true, data: r.data };
+    } catch { /* try next */ }
   }
+  return { ok: false, error: "json" };
 }
 
 export function languageFromArtifactPath(rel: string): string | undefined {
