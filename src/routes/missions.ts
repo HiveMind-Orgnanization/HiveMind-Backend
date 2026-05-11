@@ -746,16 +746,27 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
     }
     const latest = [...byPath.values()];
     if (latest.length === 0) return reply.status(404).send({ error: "no_artifacts" });
-    // Start preview.
-    const mgr = previewManager();
-    const session = await mgr.start({
-      wallet,
-      missionId: id,
-      artifacts: latest.map((a) => ({ path: a.path, content: a.content })),
-    });
-
-    const url = `/preview/${session.id}/`;
-    return { ok: true as const, sessionId: session.id, url };
+    try {
+      const mgr = previewManager();
+      const session = await mgr.start({
+        wallet,
+        missionId: id,
+        artifacts: latest.map((a) => ({ path: a.path, content: a.content })),
+      });
+      const url = `/preview/${session.id}/`;
+      return { ok: true as const, sessionId: session.id, url };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      req.log.error({ err: e, missionId: id }, "preview_start_failed");
+      const safe = msg.replace(/\s+/g, " ").slice(0, 800);
+      return reply.status(502).send({
+        error: "preview_start_failed",
+        message:
+          "Could not build or start the preview session. If this times out on first try, " +
+          "wait and retry — npm install + Vite build can take several minutes on a small server. " +
+          `Detail: ${safe}`,
+      });
+    }
   });
 
   /**
@@ -773,21 +784,29 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       url.pathname.replace(new RegExp(`^/preview/${sidRe}/api`), "") + url.search;
     const upstream = `http://127.0.0.1:${s.backendPort}${upstreamPath || "/"}`;
 
-    const body =
-      req.method === "GET" || req.method === "HEAD" ? undefined : (req.body as any);
-    const r = await fetch(upstream, {
-      method: req.method,
-      headers: { ...req.headers, host: undefined } as any,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    reply.status(r.status);
-    r.headers.forEach((v, k) => {
-      const lk = k.toLowerCase();
-      if (lk === "content-encoding" || lk === "transfer-encoding") return;
-      reply.header(k, v);
-    });
-    const text = await r.text();
-    return reply.send(text);
+    try {
+      const body =
+        req.method === "GET" || req.method === "HEAD" ? undefined : (req.body as any);
+      const r = await fetch(upstream, {
+        method: req.method,
+        headers: { ...req.headers, host: undefined } as any,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      reply.status(r.status);
+      r.headers.forEach((v, k) => {
+        const lk = k.toLowerCase();
+        if (lk === "content-encoding" || lk === "transfer-encoding") return;
+        reply.header(k, v);
+      });
+      const text = await r.text();
+      return reply.send(text);
+    } catch (e) {
+      req.log.error({ err: e, sessionId, upstream }, "preview_api_proxy_failed");
+      return reply.status(502).send({
+        error: "preview_upstream_failed",
+        message: "Preview API process is not reachable (session may have expired after deploy or restart). Start the preview again from the workspace.",
+      });
+    }
   });
 
   /**
@@ -805,39 +824,49 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
     const pathnameStripped = url.pathname.replace(new RegExp(`^/preview/${sidRe}`), "");
     const upstreamPath = (pathnameStripped === "" ? "/" : pathnameStripped) + url.search;
     const upstream = `http://127.0.0.1:${s.frontendPort}${upstreamPath}`;
-    const r = await fetch(upstream, {
-      method: req.method,
-      headers: { ...(req.headers as Record<string, string | undefined>), host: undefined } as any,
-    });
-    reply.status(r.status);
+    try {
+      const r = await fetch(upstream, {
+        method: req.method,
+        headers: { ...(req.headers as Record<string, string | undefined>), host: undefined } as any,
+      });
+      reply.status(r.status);
 
-    const hopByHop = new Set([
-      "content-encoding",
-      "transfer-encoding",
-      "connection",
-      "keep-alive",
-      "proxy-connection",
-      "content-length",
-    ]);
-    const upstreamCt = (r.headers.get("content-type") ?? "").trim();
-    r.headers.forEach((v, k) => {
-      const lk = k.toLowerCase();
-      if (hopByHop.has(lk)) return;
-      if (lk === "content-type") return;
-      reply.header(k, v);
-    });
-    const pathOnly = pathnameStripped.split("?")[0] || "/";
-    const contentType = upstreamCt.length > 0 ? upstreamCt : guessPreviewStaticMime(pathOnly);
-    reply.header("Content-Type", contentType);
+      const hopByHop = new Set([
+        "content-encoding",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "proxy-connection",
+        "content-length",
+      ]);
+      const upstreamCt = (r.headers.get("content-type") ?? "").trim();
+      r.headers.forEach((v, k) => {
+        const lk = k.toLowerCase();
+        if (hopByHop.has(lk)) return;
+        if (lk === "content-type") return;
+        reply.header(k, v);
+      });
+      const pathOnly = pathnameStripped.split("?")[0] || "/";
+      const contentType = upstreamCt.length > 0 ? upstreamCt : guessPreviewStaticMime(pathOnly);
+      reply.header("Content-Type", contentType);
 
-    if (req.method === "HEAD") {
-      const cl = r.headers.get("content-length");
-      if (cl) reply.header("content-length", cl);
-      return reply.send();
+      if (req.method === "HEAD") {
+        const cl = r.headers.get("content-length");
+        if (cl) reply.header("content-length", cl);
+        return reply.send();
+      }
+
+      const buf = Buffer.from(await r.arrayBuffer());
+      return reply.send(buf);
+    } catch (e) {
+      req.log.error({ err: e, sessionId, upstream }, "preview_static_proxy_failed");
+      return reply
+        .status(502)
+        .type("text/plain; charset=utf-8")
+        .send(
+          "Preview static server is not reachable. The session may have ended after a server restart — click Host again to rebuild.",
+        );
     }
-
-    const buf = Buffer.from(await r.arrayBuffer());
-    return reply.send(buf);
   });
 
   /**
