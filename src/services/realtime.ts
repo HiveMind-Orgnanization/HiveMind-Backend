@@ -1,14 +1,38 @@
 import WebSocket, { type RawData } from "ws";
 import type { AppConfig } from "../config/env";
 
+/** Notification payload shape consumed by the frontend NotificationsContext. The provider
+ *  reads `title`/`body`/`agent`/`missionId`/`amount` directly off the payload. */
+export type NotificationPayload = {
+  title: string;
+  body: string;
+  agent?: string;
+  missionId?: string;
+  amount?: string;
+  ts?: number;
+};
+
 export type RealtimeEvent =
   | { type: "mission.created"; payload: unknown }
   | { type: "mission.updated"; payload: unknown }
   | { type: "mission.deleted"; payload: { id: string } }
+  | { type: "mission.completed"; payload: NotificationPayload }
+  | { type: "mission.failed"; payload: NotificationPayload }
+  | { type: "mission.trial_activated"; payload: NotificationPayload }
   | { type: "task.created"; payload: unknown }
   | { type: "task.updated"; payload: unknown }
   | { type: "payment.created"; payload: unknown }
+  | { type: "payment.settled"; payload: NotificationPayload }
+  | { type: "payment.trial_used"; payload: NotificationPayload }
+  | { type: "payment.wallet_funded"; payload: NotificationPayload }
+  | { type: "execution.checkpoint"; payload: NotificationPayload }
+  | { type: "execution.error"; payload: NotificationPayload }
   | { type: "agent.activity"; payload: { agent: string; message: string; ts: number } };
+
+/** Build a NotificationPayload with `ts` defaulted to now. */
+export function notif(p: Omit<NotificationPayload, "ts"> & { ts?: number }): NotificationPayload {
+  return { ts: Date.now(), ...p };
+}
 
 type Client = { socket: WebSocket; channels: Set<string> };
 

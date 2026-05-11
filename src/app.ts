@@ -59,7 +59,7 @@ export async function buildApp(cfg: AppConfig) {
   await tasksRoutes(app, hub);
   await paymentsRoutes(app, hub);
   await memoryRoutes(app);
-  await trialRoutes(app);
+  await trialRoutes(app, hub);
 
   app.get("/ws", { websocket: true }, (socket, _req) => {
     hub.add(socket);

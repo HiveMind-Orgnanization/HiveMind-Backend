@@ -8,6 +8,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { notif, type RealtimeHub } from "../services/realtime";
 import {
   Connection,
   Keypair,
@@ -104,7 +105,7 @@ async function fetchUserTrialRaw(connection: Connection, wallet: PublicKey) {
   };
 }
 
-export async function trialRoutes(app: FastifyInstance) {
+export async function trialRoutes(app: FastifyInstance, hub?: RealtimeHub) {
   const { hivemindConfig, freeTrialConfig, tokenMint } = getPDAs();
 
   // Static config — no RPC needed
@@ -208,6 +209,17 @@ export async function trialRoutes(app: FastifyInstance) {
       tx.sign(funder);
       const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false });
       await conn.confirmTransaction({ signature: sig, ...latest }, "confirmed");
+      hub?.broadcast(
+        {
+          type: "payment.wallet_funded",
+          payload: notif({
+            title: "Wallet sponsored on devnet",
+            body: `${wallet.slice(0, 6)}…${wallet.slice(-4)} received ${FUND_AMOUNT_LAMPORTS / LAMPORTS_PER_SOL} SOL to cover registration rent.`,
+            amount: `${FUND_AMOUNT_LAMPORTS / LAMPORTS_PER_SOL} SOL`,
+          }),
+        },
+        "global",
+      );
       return {
         ok: true,
         funded: true,
@@ -236,6 +248,16 @@ export async function trialRoutes(app: FastifyInstance) {
     if (!trial) {
       return reply.status(404).send({ error: "user_trial_not_found", message: "Send registerUser transaction first" });
     }
+    hub?.broadcast(
+      {
+        type: "mission.trial_activated",
+        payload: notif({
+          title: "Free trial activated",
+          body: `Wallet ${wallet.slice(0, 6)}…${wallet.slice(-4)} unlocked ${trial.usesRemaining} free missions.`,
+        }),
+      },
+      "global",
+    );
     return { ok: true, usesRemaining: trial.usesRemaining };
   });
 
@@ -251,6 +273,16 @@ export async function trialRoutes(app: FastifyInstance) {
     const trial = await fetchUserTrialRaw(conn, pk);
     if (!trial) return reply.status(404).send({ error: "user_trial_not_found" });
 
+    hub?.broadcast(
+      {
+        type: "payment.trial_used",
+        payload: notif({
+          title: "Free credit used",
+          body: `${wallet.slice(0, 6)}…${wallet.slice(-4)} consumed one free trial — ${trial.usesRemaining}/${trial.usesTotal} left.`,
+        }),
+      },
+      "global",
+    );
     return {
       ok: true,
       usesRemaining: trial.usesRemaining,

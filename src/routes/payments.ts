@@ -29,6 +29,20 @@ export async function paymentsRoutes(app: FastifyInstance, hub: RealtimeHub) {
     if (!(await st.getMission(parsed.data.missionId))) return reply.status(404).send({ error: "mission_not_found" });
     const p = await st.createPaymentIntent(parsed.data);
     hub.broadcast({ type: "payment.created", payload: p }, "global");
+    // Surface in the notification center with a friendly title/body.
+    hub.broadcast(
+      {
+        type: "payment.settled",
+        payload: {
+          title: `Payment intent · ${p.missionId}`,
+          body: `Queued ${p.amountSol} SOL to ${p.recipientPubkey.slice(0, 6)}…${p.recipientPubkey.slice(-4)}.`,
+          missionId: p.missionId,
+          amount: `${p.amountSol} SOL`,
+          ts: Date.now(),
+        },
+      },
+      "global",
+    );
     return {
       payment: p,
       instruction:

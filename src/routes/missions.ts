@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import AdmZip from "adm-zip";
 import { z } from "zod";
 import type { AppConfig } from "../config/env";
-import type { RealtimeHub } from "../services/realtime";
+import { notif, type RealtimeHub } from "../services/realtime";
 import { hivemindStore } from "../services/store";
 import { requireWallet } from "../hooks/auth";
 import { computeMissionLiveMetrics } from "../services/mission-live-metrics";
@@ -2347,9 +2347,48 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
         mission: updatedMission ?? null,
       },
     });
+    // Notification: swarm finished. Use mission.completed when verification passed and the
+    // build was clean; otherwise execution.error so the bell shows an amber-coloured entry.
+    {
+      const ok = Boolean(verification?.ok);
+      const fileCount = dedupedPaths.length;
+      const titleLine = (title ?? id).slice(0, 60);
+      hub.broadcast(
+        ok
+          ? {
+              type: "mission.completed",
+              payload: notif({
+                title: `Mission completed · ${id}`,
+                body: `${titleLine} — ${results.length} agents shipped ${fileCount} artifacts.`,
+                missionId: id,
+              }),
+            }
+          : {
+              type: "execution.error",
+              payload: notif({
+                title: `Mission needs another pass · ${id}`,
+                body: `${titleLine} — verifier flagged ${verification?.issues?.length ?? 0} issue(s). Reply in chat to keep iterating.`,
+                missionId: id,
+              }),
+            },
+        "global",
+      );
+    }
     } catch (swarmErr) {
       const errMsg = swarmErr instanceof Error ? swarmErr.message : String(swarmErr);
       swarmJobs.set(jobId, { status: "failed", missionId: id, wallet, error: errMsg, startedAt: jobStartedAt });
+      // Notification: hard failure (uncaught throw in the background swarm run).
+      hub.broadcast(
+        {
+          type: "mission.failed",
+          payload: notif({
+            title: `Mission failed · ${id}`,
+            body: `${(title ?? id).slice(0, 60)} — ${errMsg.slice(0, 160)}`,
+            missionId: id,
+          }),
+        },
+        "global",
+      );
     }
     })(); // end background IIFE
   }); // end swarm-run POST route
@@ -2402,6 +2441,18 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
     const m = await hivemindStore().createMission({ ...parsed.data, wallet });
     hub.broadcast({ type: "mission.created", payload: m }, `mission:${m.id}`);
     hub.broadcast({ type: "mission.created", payload: m }, "global");
+    // Notification: surface a friendly "New mission queued" line in the notification center.
+    hub.broadcast(
+      {
+        type: "execution.checkpoint",
+        payload: notif({
+          title: "New mission queued",
+          body: `${m.id} · "${m.title.slice(0, 60)}${m.title.length > 60 ? "…" : ""}" — ${m.agents.length} agents on the roster.`,
+          missionId: m.id,
+        }),
+      },
+      "global",
+    );
     return m;
   });
 
