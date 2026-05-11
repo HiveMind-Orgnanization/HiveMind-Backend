@@ -817,11 +817,46 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
    * GET /preview/:sessionId/*
    * Proxies the preview frontend (built static dist server).
    */
+  /** Friendly HTML for expired/broken preview sessions so users see something useful (and the
+   * response isn't cacheable by intermediaries that fall through to the SPA 404). */
+  const previewExpiredHtml = (sessionId: string, reason: "not_found" | "unreachable"): string => {
+    const heading = reason === "not_found" ? "Preview not available" : "Preview expired";
+    const body =
+      reason === "not_found"
+        ? `Session <code>${sessionId}</code> doesn’t exist on this server. It may have been cleaned up after a deploy or restart.`
+        : `The build server for session <code>${sessionId}</code> isn’t responding. The session ended after a server restart.`;
+    return [
+      "<!doctype html>",
+      "<html lang=\"en\"><head><meta charset=\"utf-8\">",
+      "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+      `<title>${heading} — HiveMind</title>`,
+      "<style>",
+      "html,body{margin:0;height:100%;background:#04060c;color:#e6edf6;font:14px/1.55 ui-sans-serif,system-ui,-apple-system}",
+      ".wrap{max-width:480px;margin:18vh auto;padding:24px;text-align:center}",
+      "h1{font-size:18px;margin:0 0 8px;color:#67e8f9}",
+      "p{color:#94a3b8;margin:0 0 18px}",
+      "code{background:#0a1220;color:#a5f3fc;padding:1px 5px;border-radius:4px;font-family:ui-monospace,monospace;font-size:12px}",
+      "a{display:inline-block;margin-top:6px;padding:8px 18px;border:1px solid #22d3ee55;border-radius:8px;color:#67e8f9;text-decoration:none;font-weight:500}",
+      "a:hover{background:#22d3ee14;border-color:#22d3ee99}",
+      "</style></head><body><div class=\"wrap\">",
+      `<h1>${heading}</h1><p>${body}</p>`,
+      "<p>Open the Agent Workspace and click <strong>Host</strong> again to spawn a fresh preview.</p>",
+      "<a href=\"/agents\">Open Agent Workspace</a>",
+      "</div></body></html>",
+    ].join("\n");
+  };
+
   app.all("/preview/:sessionId/*", async (req, reply) => {
     const sessionId = (req.params as { sessionId: string }).sessionId;
     const mgr = previewManager();
     const s = mgr.get(sessionId);
-    if (!s) return reply.status(404).send("preview_not_found");
+    if (!s) {
+      return reply
+        .status(404)
+        .header("Cache-Control", "no-store, no-cache, must-revalidate")
+        .type("text/html; charset=utf-8")
+        .send(previewExpiredHtml(sessionId, "not_found"));
+    }
 
     const sidRe = escapeRegExpToken(sessionId);
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -853,6 +888,10 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       const pathOnly = pathnameStripped.split("?")[0] || "/";
       const contentType = upstreamCt.length > 0 ? upstreamCt : guessPreviewStaticMime(pathOnly);
       reply.header("Content-Type", contentType);
+      // Tell every intermediary cache to leave preview HTML alone — it changes per repair round.
+      if (contentType.startsWith("text/html")) {
+        reply.header("Cache-Control", "no-store, no-cache, must-revalidate");
+      }
 
       if (req.method === "HEAD") {
         const cl = r.headers.get("content-length");
@@ -866,10 +905,9 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       req.log.error({ err: e, sessionId, upstream }, "preview_static_proxy_failed");
       return reply
         .status(502)
-        .type("text/plain; charset=utf-8")
-        .send(
-          "Preview static server is not reachable. The session may have ended after a server restart — click Host again to rebuild.",
-        );
+        .header("Cache-Control", "no-store, no-cache, must-revalidate")
+        .type("text/html; charset=utf-8")
+        .send(previewExpiredHtml(sessionId, "unreachable"));
     }
   });
 
