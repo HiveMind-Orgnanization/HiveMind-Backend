@@ -1432,26 +1432,41 @@ export class PreviewManager {
     // Auto-stub missing relative imports before first build attempt.
     await stubMissingRelativeImports(frontendDir);
     let lastBuildErr: string | undefined;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        if (hasVite) {
-          await run("pnpm", ["exec", "vite", "build", "--base", previewAssetBase], frontendDir, buildEnv);
-        } else {
-          await run("pnpm", ["run", "build"], frontendDir, buildEnv);
-        }
+    let lastBuildLog: string | undefined;
+    // Five attempts (was three) — same budget as diagnoseArtifactBuild. We now capture stderr
+    // and feed it to autoHealMissingPackages so missing-dep loops resolve properly.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const result = hasVite
+        ? await runCaptured("pnpm", ["exec", "vite", "build", "--base", previewAssetBase], frontendDir, buildEnv)
+        : await runCaptured("pnpm", ["run", "build"], frontendDir, buildEnv);
+      if (result.code === 0) {
         lastBuildErr = undefined;
-        break; // success
-      } catch (e) {
-        lastBuildErr = e instanceof Error ? e.message : String(e);
-        // Attempt to auto-install missing packages from the captured error.
-        const heal = await autoHealMissingPackages(frontendDir, lastBuildErr, runCaptured);
-        if (!heal.healed) break; // nothing fixable — stop retrying
-        await run("pnpm", ["install"], frontendDir);
+        lastBuildLog = undefined;
+        break;
       }
+      lastBuildLog = result.combined;
+      lastBuildErr = `vite_build_exit_${result.code}`;
+      // 1) Missing npm packages — install them.
+      const heal = await autoHealMissingPackages(frontendDir, result.combined, runCaptured);
+      if (heal.healed) {
+        await runCaptured("pnpm", ["install"], frontendDir);
+        continue;
+      }
+      // 2) JSX in .js file — convert to .jsx and retry.
+      if (/Unexpected token|esbuild/i.test(result.combined)) {
+        const jsx = await convertJsxJsToJsx(frontendDir);
+        if (jsx.converted > 0) continue;
+      }
+      // 3) Nothing left to auto-heal — stop retrying.
+      break;
     }
     if (lastBuildErr !== undefined) {
       const hint = ensured.created ? ` (index.html was synthesized from ${ensured.entry})` : "";
-      throw new Error(`preview_frontend_build_failed${hint}: ${lastBuildErr}`);
+      // Tail the captured log so the toast in the UI shows the actual Vite error, not just
+      // "exited 1". Helpful for users to spot syntax errors / missing exports themselves.
+      const tail = (lastBuildLog ?? "").trim().slice(-800);
+      const detail = tail ? `${lastBuildErr}\n---\n${tail}` : lastBuildErr;
+      throw new Error(`preview_frontend_build_failed${hint}: ${detail}`);
     }
 
     // Serve built frontend.
