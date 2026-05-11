@@ -1502,6 +1502,11 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
                   },
                 ];
         for (const a of artifacts) {
+          // Skip malformed double-extension paths (e.g. index.css.tsx) at persist time —
+          // they corrupt both Sandpack and Vite, and the LLM keeps regenerating them otherwise.
+          if (/\.(css|scss|sass|less|html|json|md|svg|png|jpe?g|gif|webp|ico)\.(tsx?|jsx?|mjs|cjs)$/i.test(a.path)) {
+            continue;
+          }
           await st.createMissionArtifact({
             missionId: id,
             wallet,

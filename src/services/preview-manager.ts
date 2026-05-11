@@ -271,9 +271,6 @@ async function normalizeTailwindForBuild(frontendDir: string): Promise<void> {
   const deps = (pkg.dependencies ?? {}) as Record<string, string>;
   const devDeps = (pkg.devDependencies ?? {}) as Record<string, string>;
 
-  const twVersion = devDeps.tailwindcss ?? deps.tailwindcss ?? "";
-  if (!twVersion) return; // no tailwindcss at all — nothing to do
-
   // Detect CSS syntax style: v4 uses `@import "tailwindcss"`, v3 uses `@tailwind …`
   const srcDir = path.join(frontendDir, "src");
   const cssFiles: string[] = [];
@@ -300,6 +297,35 @@ async function normalizeTailwindForBuild(frontendDir: string): Promise<void> {
     if (/@tailwind\s+(base|components|utilities)/.test(src)) hasV3Directives = true;
     if (/@import\s+["']tailwindcss["']/.test(src)) hasV4Import = true;
   }
+
+  // Check for tailwind.config files which signal Tailwind intent even if package.json is missing the dep.
+  const twConfigCandidates = ["tailwind.config.ts", "tailwind.config.js", "tailwind.config.cjs", "tailwind.config.mjs"];
+  const hasTwConfigFile = (
+    await Promise.all(twConfigCandidates.map((f) => fileExists(path.join(frontendDir, f))))
+  ).some(Boolean);
+
+  let twVersion = devDeps.tailwindcss ?? deps.tailwindcss ?? "";
+  // Agents often ship tailwind.config.* + @tailwind directives but forget the npm dep — Vite then
+  // either crashes on missing module or builds with no styles. Inject the dep when there's clear
+  // Tailwind intent in the source tree.
+  if (!twVersion && (hasV3Directives || hasV4Import || hasTwConfigFile)) {
+    if (hasV4Import) {
+      devDeps.tailwindcss = "^4.0.0";
+      devDeps["@tailwindcss/vite"] = devDeps["@tailwindcss/vite"] ?? "^4.0.0";
+    } else {
+      devDeps.tailwindcss = "^3.4.0";
+      if (!devDeps.postcss && !deps.postcss) devDeps.postcss = "^8.4.47";
+      if (!devDeps.autoprefixer && !deps.autoprefixer) devDeps.autoprefixer = "^10.4.20";
+    }
+    pkg.dependencies = deps;
+    pkg.devDependencies = devDeps;
+    await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
+    for (const lock of ["pnpm-lock.yaml", "package-lock.json", "yarn.lock"]) {
+      await unlink(path.join(frontendDir, lock)).catch(() => {});
+    }
+    twVersion = devDeps.tailwindcss;
+  }
+  if (!twVersion) return; // no Tailwind intent anywhere — leave the project alone
 
   // Determine installed major from spec
   const specMajor = (() => {
@@ -445,6 +471,26 @@ async function listFilesRecursive(dir: string): Promise<string[]> {
   };
   await walk(dir);
   return out;
+}
+
+/**
+ * Agents sometimes emit malformed double-extension paths like `index.css.tsx`,
+ * `styles.scss.tsx`, or `data.json.tsx`. Vite tries to parse them as TS and the build aborts.
+ * Drop them before install/build — the matching real `.css`/`.json` file is usually already present.
+ */
+async function purgeMalformedDoubleExtensionFiles(frontendDir: string): Promise<{ removed: number }> {
+  if (!(await fileExists(frontendDir))) return { removed: 0 };
+  const files = await listFilesRecursive(frontendDir);
+  let removed = 0;
+  for (const abs of files) {
+    if (abs.includes(`${path.sep}node_modules${path.sep}`)) continue;
+    const base = path.basename(abs);
+    if (/\.(css|scss|sass|less|html|json|md|svg|png|jpe?g|gif|webp|ico)\.(tsx?|jsx?|mjs|cjs)$/i.test(base)) {
+      await unlink(abs).catch(() => {});
+      removed++;
+    }
+  }
+  return { removed };
 }
 
 async function convertJsxJsToJsx(frontendDir: string): Promise<{ converted: number }> {
@@ -1203,6 +1249,7 @@ export class PreviewManager {
         }
       }
 
+      await purgeMalformedDoubleExtensionFiles(frontendDir);
       await normalizePackageNames(frontendDir);
       await normalizeLegacyViteFrontendPackageJson(frontendDir);
       await normalizeTailwindForBuild(frontendDir);
@@ -1344,6 +1391,8 @@ export class PreviewManager {
       stdio: "pipe",
     });
 
+    // Drop malformed double-extension files like `index.css.tsx` before anything else.
+    await purgeMalformedDoubleExtensionFiles(frontendDir);
     // Fix AI-hallucinated package names (e.g. @lucide/react → lucide-react).
     await normalizePackageNames(frontendDir);
     // Align ancient Vite 2/3 stacks before install — avoids `vite.createFilter is not a function` during config load.
