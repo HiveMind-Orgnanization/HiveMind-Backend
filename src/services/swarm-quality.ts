@@ -194,3 +194,55 @@ export function verifyViteApiUrlAntipattern(contents: Map<string, string>): stri
     `Remove duplicate /api/ after import.meta.env.VITE_API_URL (${bad.slice(0, 6).join(", ")}${bad.length > 6 ? "…" : ""}). HiveMind sets VITE_API_URL to the API root (.../api); use \`\${import.meta.env.VITE_API_URL}/games\` not .../api/games. After fetch, use response.ok and Array.isArray(...) before .map.`,
   ];
 }
+
+/**
+ * Frontend ships <BrowserRouter><Routes> but no `<Route path="/" …/>` and no catch-all → at runtime
+ * RR6 fires "No routes matched location '/'" and the preview iframe is blank.
+ * Catch this statically so the verify-repair loop can fix it before the user ever opens the preview.
+ */
+export function verifyReactRouterHasHomeRoute(contents: Map<string, string>): string[] {
+  let usesRouter = false;
+  let hasRoutes = false;
+  let hasRootRoute = false;
+  let hasCatchAll = false;
+  for (const [p, src] of contents.entries()) {
+    const pl = p.replace(/\\/g, "/").toLowerCase();
+    if (!pl.startsWith("frontend/") || !/\.(tsx|jsx)$/i.test(pl)) continue;
+    if (!src.includes("react-router-dom")) continue;
+    usesRouter = true;
+    if (/<\s*Routes\b/.test(src) || /createBrowserRouter\s*\(/.test(src)) hasRoutes = true;
+    // path="/" with optional spaces; allow single or double quotes
+    if (/<\s*Route\b[^>]*\bpath\s*=\s*(["'])\/\1/.test(src)) hasRootRoute = true;
+    // Common index route patterns: `<Route index …/>`, exact path "" or "/*"
+    if (/<\s*Route\b[^>]*\bindex\b/.test(src)) hasRootRoute = true;
+    if (/<\s*Route\b[^>]*\bpath\s*=\s*(["'])\1/.test(src)) hasRootRoute = true; // path=""
+    if (/<\s*Route\b[^>]*\bpath\s*=\s*(["'])\*\1/.test(src)) hasCatchAll = true;
+    if (/<\s*Route\b[^>]*\bpath\s*=\s*(["'])\/\*\1/.test(src)) hasCatchAll = true;
+  }
+  if (!usesRouter || !hasRoutes) return [];
+  if (hasRootRoute || hasCatchAll) return [];
+  return [
+    "React Router renders no UI at `/` — `<Routes>` is present but no `<Route path=\"/\">`, `<Route index />`, or catch-all `<Route path=\"*\">` exists. The preview iframe loads at `/` so the page will be blank with a 'No routes matched location \"/\"' console warning. Add an explicit home route OR a catch-all that renders the main view.",
+  ];
+}
+
+/**
+ * BrowserRouter inside Sandpack's iframe is mounted at `/` — a hardcoded `basename` to a deeper path
+ * (e.g. "/preview/abc/") makes routes never match in the live preview. The hosted Vite build path
+ * is injected at build time, so source files should not pin a basename.
+ */
+export function verifyNoHardcodedBasename(contents: Map<string, string>): string[] {
+  const bad: string[] = [];
+  for (const [p, src] of contents.entries()) {
+    const pl = p.replace(/\\/g, "/");
+    if (!/^frontend\/.*\.(tsx|jsx)$/i.test(pl)) continue;
+    if (!src.includes("react-router-dom")) continue;
+    // Detect basename="/something" or basename={'/something'} — but allow basename={import.meta.env.BASE_URL}
+    const m = src.match(/basename\s*=\s*(?:["']([^"']+)["']|\{\s*["']([^"']+)["']\s*\})/);
+    if (m && (m[1] ?? m[2])) bad.push(pl);
+  }
+  if (bad.length === 0) return [];
+  return [
+    `Remove hardcoded \`basename\` on Router in ${bad.slice(0, 4).join(", ")}${bad.length > 4 ? "…" : ""}. The hosted Vite preview injects \`basename={import.meta.env.BASE_URL}\` automatically; a string literal breaks Sandpack and double-prefixes hosted routes.`,
+  ];
+}

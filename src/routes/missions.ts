@@ -16,6 +16,8 @@ import {
   verifyUiContentHeuristics,
   verifyViteApiUrlAntipattern,
   verifyStaleViteToolchain,
+  verifyReactRouterHasHomeRoute,
+  verifyNoHardcodedBasename,
 } from "../services/swarm-quality";
 import { appendSwarmQualityLog } from "../services/swarm-quality-log";
 import type { Mission } from "../types/domain";
@@ -526,6 +528,8 @@ function verifySwarmDeliverables(
     ...verifyUiContentHeuristics(contents, title, objective),
     ...verifyViteApiUrlAntipattern(contents),
     ...verifyStaleViteToolchain(contents),
+    ...verifyReactRouterHasHomeRoute(contents),
+    ...verifyNoHardcodedBasename(contents),
   ];
   if (extra.length === 0) return base;
   const issues = [...base.issues, ...extra];

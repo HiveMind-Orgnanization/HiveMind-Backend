@@ -40,6 +40,8 @@ function buildSystemPrompt(agent: AgentProfile, missionObjective?: string, opts?
         agent.specialization === "Development" || agent.specialization === "Coordination"
           ? [
               "HiveMind preview injects import.meta.env.VITE_API_URL as the full API base URL (already ends with /api). Use `${import.meta.env.VITE_API_URL}/your-route` — never `${...VITE_API_URL}/api/...` (that produces /api/api and breaks requests). After fetch: check response.ok; parse JSON defensively; use Array.isArray before .map.",
+              "If you use react-router-dom: the preview iframe mounts at `/`. Define an explicit `<Route path=\"/\" element={<Home/>}/>` (or `<Route index .../>`, or a catch-all `<Route path=\"*\".../>`). NEVER hardcode a `basename` prop — the HiveMind preview adds `basename={import.meta.env.BASE_URL}` automatically. Without a `/` route the page renders blank with 'No routes matched location \"/\"'.",
+              "Single-page apps don't need react-router-dom at all when there's only one screen — prefer conditional rendering with useState for two-screen demos. Don't pull in routing libraries you don't need.",
             ]
           : [];
       return [
