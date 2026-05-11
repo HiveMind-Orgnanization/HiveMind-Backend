@@ -190,6 +190,124 @@ async function normalizeLegacyViteFrontendPackageJson(
 }
 
 /**
+ * Tailwind v4 removed the PostCSS-plugin approach entirely — `require('tailwindcss')` in
+ * postcss.config.js throws at build time if tailwindcss@4 is installed.
+ * LLMs often generate v3-style config but pin `tailwindcss: "latest"` (→ v4 now).
+ *
+ * Fix: if the generated CSS uses v3 directives (@tailwind base / components / utilities)
+ * force tailwindcss to ^3.4.21, ensure postcss.config.js exists and is correct, and
+ * ensure tailwind.config.ts exists with a minimal content glob.
+ */
+async function normalizeTailwindForBuild(frontendDir: string): Promise<void> {
+  const pkgPath = path.join(frontendDir, "package.json");
+  let pkg: Record<string, unknown>;
+  try {
+    pkg = JSON.parse(await readFile(pkgPath, "utf8")) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  const deps = (pkg.dependencies ?? {}) as Record<string, string>;
+  const devDeps = (pkg.devDependencies ?? {}) as Record<string, string>;
+
+  const twVersion = devDeps.tailwindcss ?? deps.tailwindcss ?? "";
+  if (!twVersion) return; // no tailwindcss at all — nothing to do
+
+  // Detect CSS syntax style: v4 uses `@import "tailwindcss"`, v3 uses `@tailwind …`
+  const srcDir = path.join(frontendDir, "src");
+  const cssFiles: string[] = [];
+  const addCss = async (dir: string) => {
+    if (!(await fileExists(dir))) return;
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const e of entries) {
+      const abs = path.join(dir, e.name);
+      if (e.isDirectory()) await addCss(abs);
+      else if (e.isFile() && /\.css$/i.test(e.name)) cssFiles.push(abs);
+    }
+  };
+  await addCss(srcDir);
+  // Also check root-level CSS in frontend/
+  const rootCss = await readdir(frontendDir, { withFileTypes: true }).catch(() => []);
+  for (const e of rootCss) {
+    if (e.isFile() && /\.css$/i.test(e.name)) cssFiles.push(path.join(frontendDir, e.name));
+  }
+
+  let hasV3Directives = false;
+  let hasV4Import = false;
+  for (const f of cssFiles) {
+    const src = await readFile(f, "utf8").catch(() => "");
+    if (/@tailwind\s+(base|components|utilities)/.test(src)) hasV3Directives = true;
+    if (/@import\s+["']tailwindcss["']/.test(src)) hasV4Import = true;
+  }
+
+  // Determine installed major from spec
+  const specMajor = (() => {
+    const m = String(twVersion).match(/(\d+)/);
+    if (!m) return null;
+    return parseInt(m[1]!, 10);
+  })();
+
+  const usingV4TailwindVite = Boolean(devDeps["@tailwindcss/vite"] ?? deps["@tailwindcss/vite"]);
+
+  // Case 1: v3 directives but v4+ installed (or "latest" which resolves to v4)
+  const needsDowngrade =
+    hasV3Directives &&
+    !hasV4Import &&
+    !usingV4TailwindVite &&
+    (twVersion === "latest" || (specMajor !== null && specMajor >= 4));
+
+  if (needsDowngrade) {
+    if (devDeps.tailwindcss) devDeps.tailwindcss = "^3.4.21";
+    else deps.tailwindcss = "^3.4.21";
+    // Ensure postcss + autoprefixer exist
+    if (!devDeps.postcss && !deps.postcss) devDeps.postcss = "^8.4.47";
+    if (!devDeps.autoprefixer && !deps.autoprefixer) devDeps.autoprefixer = "^10.4.20";
+    pkg.dependencies = deps;
+    pkg.devDependencies = devDeps;
+    await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
+    // Remove lock files so npm/pnpm reinstalls with pinned version
+    for (const lock of ["pnpm-lock.yaml", "package-lock.json", "yarn.lock"]) {
+      await unlink(path.join(frontendDir, lock)).catch(() => {});
+    }
+  }
+
+  // Ensure postcss.config.js exists and uses v3 plugin when v3 directives present
+  if (hasV3Directives && !usingV4TailwindVite) {
+    const postcssConfigs = ["postcss.config.js", "postcss.config.cjs", "postcss.config.ts"];
+    const hasPostcss = (await Promise.all(postcssConfigs.map((f) => fileExists(path.join(frontendDir, f))))).some(Boolean);
+    if (!hasPostcss) {
+      await writeFile(
+        path.join(frontendDir, "postcss.config.js"),
+        `module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } };\n`,
+        "utf8",
+      );
+    }
+    // Ensure tailwind.config.ts exists
+    const twConfigs = ["tailwind.config.ts", "tailwind.config.js", "tailwind.config.cjs"];
+    const hasTwConfig = (await Promise.all(twConfigs.map((f) => fileExists(path.join(frontendDir, f))))).some(Boolean);
+    if (!hasTwConfig) {
+      await writeFile(
+        path.join(frontendDir, "tailwind.config.ts"),
+        `import type { Config } from 'tailwindcss';\nexport default { content: ['./index.html', './src/**/*.{ts,tsx,js,jsx}'], theme: { extend: {} }, plugins: [] } satisfies Config;\n`,
+        "utf8",
+      );
+    }
+  }
+
+  // Case 2: v4 import style but @tailwindcss/vite missing from devDeps
+  if (hasV4Import && !usingV4TailwindVite) {
+    devDeps["@tailwindcss/vite"] = "^4.0.0";
+    if (devDeps.tailwindcss) devDeps.tailwindcss = "^4.0.0";
+    else deps.tailwindcss = "^4.0.0";
+    pkg.dependencies = deps;
+    pkg.devDependencies = devDeps;
+    await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
+    for (const lock of ["pnpm-lock.yaml", "package-lock.json", "yarn.lock"]) {
+      await unlink(path.join(frontendDir, lock)).catch(() => {});
+    }
+  }
+}
+
+/**
  * Generated tsconfig.json files often enable strict mode without skipLibCheck, causing
  * third-party type errors to abort the build. Always set skipLibCheck + noEmit: false.
  */
@@ -1017,6 +1135,7 @@ export class PreviewManager {
       }
 
       await normalizeLegacyViteFrontendPackageJson(frontendDir);
+      await normalizeTailwindForBuild(frontendDir);
       await normalizeTsConfigForBuild(frontendDir);
       await convertJsxJsToJsx(frontendDir);
       await normalizeReactRouterDomForV6Bundle(frontendDir);
@@ -1157,6 +1276,8 @@ export class PreviewManager {
 
     // Align ancient Vite 2/3 stacks before install — avoids `vite.createFilter is not a function` during config load.
     await normalizeLegacyViteFrontendPackageJson(frontendDir);
+    // Pin Tailwind to v3 when v3 CSS syntax is used (v4 removed postcss plugin approach).
+    await normalizeTailwindForBuild(frontendDir);
     // Patch tsconfig so strict lib checks / missing types never abort the build.
     await normalizeTsConfigForBuild(frontendDir);
     // Build frontend with API base path pointing at our proxy route (Vite requires index.html).
