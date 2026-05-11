@@ -226,8 +226,19 @@ async function normalizePackageNames(frontendDir: string): Promise<void> {
       if (!(wrong in block)) continue;
       const ver = block[wrong]!;
       delete block[wrong];
-      if (correct) block[correct] = block[correct] ?? ver; // keep existing ver if already present
+      if (correct) block[correct] = block[correct] ?? ver;
       changed = true;
+    }
+    // Fix invalid Tailwind v3 versions — LLMs generate "^3.4.21" but latest v3 is 3.4.19.
+    // Any ^3.4.20+ or ^3.5+ doesn't exist; pin to ^3.4.0 which resolves to 3.4.19 (v3-lts).
+    if (block["tailwindcss"]) {
+      const twSpec = block["tailwindcss"];
+      const m = twSpec.match(/(\d+)\.(\d+)\.(\d+)/);
+      if (m) {
+        const [, maj, min, patch] = m.map(Number);
+        const isInvalidV3 = maj === 3 && (min! > 4 || (min === 4 && patch! > 19));
+        if (isInvalidV3) { block["tailwindcss"] = "^3.4.0"; changed = true; }
+      }
     }
   }
 
@@ -299,12 +310,19 @@ async function normalizeTailwindForBuild(frontendDir: string): Promise<void> {
 
   const usingV4TailwindVite = Boolean(devDeps["@tailwindcss/vite"] ?? deps["@tailwindcss/vite"]);
 
-  // Case 1: v3 directives but v4+ installed (or "latest" which resolves to v4)
+  // Case 1: v3 directives but v4+ installed, "latest", or invalid v3 patch (e.g. ^3.4.21 → doesn't exist)
+  const isInvalidV3Patch = (() => {
+    const m = String(twVersion).match(/(\d+)\.(\d+)\.(\d+)/);
+    if (!m) return false;
+    const [, maj, min, patch] = m.map(Number);
+    return maj === 3 && (min! > 4 || (min === 4 && patch! > 19));
+  })();
+
   const needsDowngrade =
     hasV3Directives &&
     !hasV4Import &&
     !usingV4TailwindVite &&
-    (twVersion === "latest" || (specMajor !== null && specMajor >= 4));
+    (twVersion === "latest" || (specMajor !== null && specMajor >= 4) || isInvalidV3Patch);
 
   if (needsDowngrade) {
     if (devDeps.tailwindcss) devDeps.tailwindcss = "^3.4.0";
