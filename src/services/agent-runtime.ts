@@ -145,7 +145,7 @@ export type InvokeAgentOptions = {
   extraSystemBlock?: string;
   /** Mission priority — drives model selection (high/crit → heavy model). */
   priority?: MissionPriority;
-  /** Explicit model id override — takes precedence over priority-based selection. */
+  /** Explicit OpenAI model id (ignored when env OPENAI_MODEL_ALL is set). */
   modelOverride?: string;
 };
 
@@ -154,7 +154,7 @@ function isGroqSmallModel(model: string): boolean {
   return /8b|instant|3\.1-8b|gemma.*2b|gemma.*7b/i.test(model);
 }
 
-function isOpenAiModel(model: string): boolean {
+export function isOpenAiModel(model: string): boolean {
   return /^gpt-|^o[1-9]-|^o\d/i.test(model);
 }
 
@@ -170,7 +170,7 @@ function isReasoningModel(model: string): boolean {
 
 /**
  * Models that require `max_completion_tokens` instead of `max_tokens`.
- * Includes all reasoning models AND all gpt-5.x series.
+ * Includes all reasoning models AND all gpt-5.x family (incl. gpt-5.5-* ids).
  */
 function requiresMaxCompletionTokens(model: string): boolean {
   return isReasoningModel(model) || /^gpt-5/i.test(model);
@@ -186,7 +186,7 @@ function completionBudget(
   const roleMedium = agent.specialization === "Design";
   const heavy = Boolean(invokeOpts?.artifactHeavy || invokeOpts?.persistArtifactUpdates);
 
-  // GPT-5 family: much larger output windows available.
+  // GPT-5 family (incl. gpt-5.5-*): much larger output windows available.
   const isGpt5 = /^gpt-5/i.test(model);
   if (isGpt5) {
     if (roleLarge) return heavy ? 32_000 : 24_000;
@@ -219,7 +219,7 @@ function completionBudget(
 }
 
 function userMessageCharCap(model: string, invokeOpts?: InvokeAgentOptions): number {
-  // GPT-5 family has 1M+ context — allow much larger inputs.
+  // GPT-5 family (incl. gpt-5.5-*) has large context — allow much larger inputs.
   if (/^gpt-5/i.test(model)) return 64_000;
   // OpenAI: high context limits, no per-minute TPM constraint on paid tier.
   if (isOpenAiModel(model)) return 24_000;
@@ -270,20 +270,28 @@ export async function invokeAgentCompletion(
   const fallbackModel = cfg.GROQ_FALLBACK_MODEL ?? "llama-3.1-8b-instant";
   const backoffMs = cfg.GROQ_429_BACKOFF_MS ?? 12_000;
   const openAiKey = cfg.OPENAI_API_KEY;
+  const openAiAll = cfg.OPENAI_MODEL_ALL?.trim();
   const openAiModel = cfg.OPENAI_MODEL ?? "gpt-4o-mini";
   const openAiHeavy = cfg.OPENAI_MODEL_HEAVY ?? "gpt-4.1";
   // Critical priority gets the strongest available model when no per-agent override is set.
   const openAiCrit = cfg.OPENAI_MODEL_CRIT ?? "gpt-5.1";
 
-  // Resolve OpenAI model: explicit override > crit > heavy > default
+  /**
+   * Resolve OpenAI model id:
+   * - OPENAI_MODEL_ALL (env): forces one model for every agent / priority (overrides mission agentModels).
+   * - invokeOpts.modelOverride: per-call when ALL is not set (e.g. mission agentModels from swarm).
+   * - Else: crit > heavy > std from env.
+   */
   const resolvedOpenAiModel =
-    invokeOpts?.modelOverride && isOpenAiModel(invokeOpts.modelOverride)
-      ? invokeOpts.modelOverride
-      : priority === "crit"
-        ? openAiCrit
-        : useOpenAiHeavy
-          ? openAiHeavy
-          : openAiModel;
+    openAiAll && isOpenAiModel(openAiAll)
+      ? openAiAll
+      : invokeOpts?.modelOverride && isOpenAiModel(invokeOpts.modelOverride)
+        ? invokeOpts.modelOverride
+        : priority === "crit"
+          ? openAiCrit
+          : useOpenAiHeavy
+            ? openAiHeavy
+            : openAiModel;
 
   const tryOpenAi = async (reasonPrefix: string): Promise<AgentInvokeResult | null> => {
     if (!openAiKey) return null;

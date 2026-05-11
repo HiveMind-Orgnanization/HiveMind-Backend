@@ -70,6 +70,11 @@ const envSchema = z.object({
    * https://platform.openai.com/api-keys
    */
   OPENAI_API_KEY: z.preprocess((_v) => normalizeOptionalApiKey(process.env.OPENAI_API_KEY), z.string().optional()),
+  /**
+   * When set, every OpenAI-backed agent call uses this model (overrides per-mission agentModels,
+   * priority tier, and std/heavy/crit). Requires OPENAI_API_KEY. Example: gpt-5.5-long-context
+   */
+  OPENAI_MODEL_ALL: z.preprocess(trimOpt, z.string().optional()),
   /** OpenAI model id (e.g. gpt-4.1-mini, gpt-4o-mini). */
   OPENAI_MODEL: z.preprocess(trimOpt, z.string().optional()),
   /**
@@ -115,10 +120,15 @@ export function loadConfig(): AppConfig {
       console.log(`[hivemind] GROQ_API_KEY missing — invoke uses mock. Env path tried: ${backendEnvPath}`);
     }
     if (cfg.OPENAI_API_KEY) {
-      const m = cfg.OPENAI_MODEL ?? "gpt-4o-mini";
-      const heavy = cfg.OPENAI_MODEL_HEAVY ?? "gpt-4.1";
-      const crit = cfg.OPENAI_MODEL_CRIT ?? "gpt-5.1";
-      console.log(`[hivemind] OpenAI configured (key ${cfg.OPENAI_API_KEY.length}ch · std:${m} · high:${heavy} · crit:${crit}).`);
+      const all = cfg.OPENAI_MODEL_ALL?.trim();
+      if (all) {
+        console.log(`[hivemind] OpenAI configured (key ${cfg.OPENAI_API_KEY.length}ch · OPENAI_MODEL_ALL=${all} — all tiers use this model).`);
+      } else {
+        const m = cfg.OPENAI_MODEL ?? "gpt-4o-mini";
+        const heavy = cfg.OPENAI_MODEL_HEAVY ?? "gpt-4.1";
+        const crit = cfg.OPENAI_MODEL_CRIT ?? "gpt-5.1";
+        console.log(`[hivemind] OpenAI configured (key ${cfg.OPENAI_API_KEY.length}ch · std:${m} · high:${heavy} · crit:${crit}).`);
+      }
     }
   }
   return cfg;

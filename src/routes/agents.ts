@@ -10,7 +10,7 @@ import {
   latestArtifactsByPath,
   parsePersistArtifactReply,
 } from "../services/agent-invoke-artifacts";
-import { invokeAgentCompletion } from "../services/agent-runtime";
+import { invokeAgentCompletion, isOpenAiModel } from "../services/agent-runtime";
 import { sanitizeViteApiUrlDoubleApi } from "../services/preview-manager";
 import { hivemindStore } from "../services/store";
 
@@ -21,6 +21,8 @@ const invokeBody = z.object({
   includeArtifacts: z.boolean().optional().default(true),
   /** Require JSON `{ assistantReply, fileUpdates[] }` and persist fileUpdates to mission_artifacts. */
   persistArtifactUpdates: z.boolean().optional().default(false),
+  /** OpenAI chat model id when OPENAI_API_KEY is set (overridden by env OPENAI_MODEL_ALL). */
+  model: z.string().max(128).optional(),
 });
 
 export async function agentsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg: AppConfig) {
@@ -47,7 +49,7 @@ export async function agentsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg: 
     if (!parsed.success) {
       return reply.status(400).send({ error: "invalid_body", details: parsed.error.flatten() });
     }
-    const { message, missionId, includeArtifacts, persistArtifactUpdates } = parsed.data;
+    const { message, missionId, includeArtifacts, persistArtifactUpdates, model: bodyModel } = parsed.data;
     if (persistArtifactUpdates && !missionId) {
       return reply
         .status(400)
@@ -82,9 +84,12 @@ export async function agentsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg: 
       }
     }
 
+    const modelOverride =
+      bodyModel?.trim() && isOpenAiModel(bodyModel.trim()) ? bodyModel.trim() : undefined;
     const result = await invokeAgentCompletion(cfg, agent, userMessageForModel, missionObjective, {
       artifactHeavy,
       persistArtifactUpdates: Boolean(persistArtifactUpdates && missionId),
+      ...(modelOverride ? { modelOverride } : {}),
     });
 
     let replyText = result.reply;
