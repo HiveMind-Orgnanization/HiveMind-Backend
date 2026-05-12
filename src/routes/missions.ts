@@ -1203,6 +1203,21 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
     const st = hivemindStore();
     const m = await st.getMission(id);
     if (!m) return reply.status(404).send({ error: "not_found" });
+    // Strict ownership check — without this, wallet B could trigger a swarm on wallet A's
+    // mission, which would persist artifacts under wallet B's column. The artifacts then
+    // become invisible to wallet A (the legitimate owner) when they re-open the mission.
+    // Return 404 (not 403) to avoid leaking the existence of a mission to non-owners.
+    const ownerWallet = (m as Mission & { wallet?: string }).wallet;
+    if (ownerWallet && ownerWallet !== wallet) {
+      return reply.status(404).send({ error: "not_found" });
+    }
+    // Pin artifact attribution to the mission OWNER's wallet (if set), not the caller.
+    // For legacy missions with NULL wallet, fall back to the caller. This guarantees
+    // listMissionArtifacts(ownerWallet, id) always finds the artifacts the swarm wrote,
+    // even if some intermediate request was made by a different wallet (e.g. a re-run
+    // triggered by an admin/test session). We reassign `wallet` so every downstream
+    // createMissionArtifact / broadcast in this handler uses the owner's pubkey.
+    wallet = ownerWallet ?? wallet;
     const title = m.title.trim();
     const objective = m.objective.trim();
 
