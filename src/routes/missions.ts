@@ -1460,6 +1460,61 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
 
     const needBackendStack = missionRequiresBackend(title, objective);
 
+    /**
+     * Conversational dialogue requirement.
+     *
+     * The UI streams this back into the chat panel character-by-character so
+     * the user feels like they're watching a real team of specialists talk to
+     * each other. Each role:
+     *  - opens by acknowledging the previous agent(s) by NAME and thanking
+     *    them for specific outputs they produced (no generic "thanks team"),
+     *  - states what THIS role will explore in 2-3 plain-language sentences
+     *    (first person, warm, decisive — Slack tone, not corporate-speak),
+     *  - closes with a handoff to the named next agent.
+     *
+     * Output shape depends on role:
+     *  - JSON-returning roles (Design / Development / Coordination) include
+     *    a top-level "dialogue" string FIELD inside the JSON envelope.
+     *  - Markdown/text roles START their reply with `## Dialogue` followed
+     *    by the message, then a blank line, then `## Output` followed by
+     *    the role's normal deliverable.
+     */
+    const dialogueInstruction = (role: string, prevRoles: string[], nextRole: string | null): string => {
+      const prevList = prevRoles.length > 0 ? prevRoles.join(", ") : "HiveMind (mission orchestrator)";
+      const handoff = nextRole ?? "Coordination (final integrator)";
+      const isJsonRole = ["Design", "Development", "Coordination"].includes(role);
+      const intro = [
+        "── Conversational dialogue (REQUIRED, this is how the user sees the swarm work) ──",
+        `You are ${role}. The previous agent${prevRoles.length === 1 ? "" : "s"} that just finished: ${prevList}.`,
+        `The next agent that will receive your output: ${handoff}.`,
+        "",
+        "Write a short conversational opener (3-5 sentences, ~60-100 words) that:",
+        `  • Greets / thanks ${prevList} by name and references ONE specific thing they produced (a metric, a class name, a route, a positioning line — be specific, not generic).`,
+        "  • States in first person what YOU will do next and which trade-off you're making.",
+        `  • Ends with a direct handoff to ${handoff} (e.g. \"${handoff}, you'll get my <thing> next — focus on <thing>\").`,
+        "",
+        "Tone: warm, decisive, plain English, the way senior teammates talk in Slack. NOT corporate (\"leveraging synergies\"), NOT robotic (\"Task complete.\"), NOT vague (\"good job team\"). Be a person.",
+      ];
+      if (isJsonRole) {
+        intro.push(
+          "",
+          'Put this message in the JSON envelope as a top-level "dialogue" string field, BEFORE "summary". Example shape (truncated):',
+          '  { "dialogue": "Hey Design — that color palette is sharp...", "summary": "...", "artifacts": [...] }',
+        );
+      } else {
+        intro.push(
+          "",
+          "Format your reply with this exact structure (two markdown headers):",
+          "  ## Dialogue",
+          "  <your conversational opener here>",
+          "",
+          "  ## Output",
+          "  <your normal deliverable below — same content you would have produced anyway>",
+        );
+      }
+      return intro.join("\n");
+    };
+
     const roleInstruction = (role: string) => {
       switch (role) {
         case "Strategy":
@@ -1633,7 +1688,7 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       swarmJobs.set(jobId, { ...j, progress: rest });
     };
 
-    const runOne = async (role: string, opts?: { userSuffix?: string; artifactHeavy?: boolean }) => {
+    const runOne = async (role: string, opts?: { userSuffix?: string; artifactHeavy?: boolean; prevRoles?: string[]; nextRole?: string | null }) => {
       const agent = pickAgent(role);
       const taskMeta = taskByRole.get(role);
       if (taskMeta) {
@@ -1672,12 +1727,12 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       const missionConfig = (m as any)?.config as Record<string, unknown> | undefined;
       const missionPriorityKey = ((missionConfig?.priorityKey ?? "std") as string) as MissionPriority;
       const agentModelOverride = (missionConfig?.agentModels as Record<string, string> | undefined)?.[role];
-      // Stream the LLM output back into swarmJobs so the workspace code panel
-      // can render files char-by-char while they're being written. Only enable
-      // for the JSON-artifact roles where the buffer actually contains a path +
-      // content the frontend can parse — markdown roles like Marketing don't
-      // benefit and would just churn the polling endpoint.
-      const enableStream = artifactJsonRoles.has(role);
+      // Stream the LLM output for EVERY role so the live "conversational
+      // dialogue" the prompt now requires can land in the chat panel
+      // character-by-character. JSON-artifact roles (Development, Design,
+      // Coordination) additionally feed their `content` fields into the live
+      // code editor — both effects share the same streamingReply buffer.
+      const enableStream = true;
       const invokeSwarmOpts = {
         swarmArtifactStep: artifactJsonRoles.has(role),
         artifactHeavy: artifactHeavyFlag,
@@ -1694,9 +1749,29 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
           ? buildDesignRagUserBlock(allArtsForRag)
           : "";
         const ctx = renderContext(role);
+        // Derive prev/next role for the conversational opener so the LLM can
+        // address teammates by name. prevRoles = every role that already
+        // produced an output (insertion order on outputByRole). nextRole =
+        // whoever follows in the configured roles list, or Coordination as
+        // the catch-all integrator.
+        const autoPrev: string[] = opts?.prevRoles && opts.prevRoles.length > 0
+          ? opts.prevRoles
+          : Array.from(outputByRole.keys()).filter((r) => r !== role);
+        const autoNext: string | null = opts?.nextRole !== undefined
+          ? opts.nextRole
+          : (() => {
+              const idx = roles.indexOf(role);
+              if (idx < 0) return role === "Coordination" ? null : "Coordination";
+              for (let i = idx + 1; i < roles.length; i++) {
+                if (roles[i] && roles[i] !== role) return roles[i] as string;
+              }
+              return role === "Coordination" ? null : "Coordination";
+            })();
+        const dialogueBlock = dialogueInstruction(role, autoPrev, autoNext);
         const roleBlock = [
           `Your role: ${role}`,
           roleInstruction(role),
+          dialogueBlock,
           landingSupplement,
           designRagBlock,
           opts?.userSuffix ? `\n${opts.userSuffix}` : "",
@@ -1804,6 +1879,35 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
 
         outputByRole.set(role, { agentName: agent.name, specialization: agent.specialization, reply: res.reply });
 
+        // For non-codegen markdown roles, the LLM now prefixes its reply with
+        // `## Dialogue\n<conversational>\n\n## Output\n<actual deliverable>`
+        // (the conversational opener streams into the chat panel in real time;
+        // we don't want it dumped into the persisted notes/X.md artifact too).
+        // Strip the dialogue section from the persisted text — the chat panel
+        // already has it, and the notes file should contain ONLY the
+        // deliverable so downstream agents reading via renderContext don't
+        // see duplicated chit-chat.
+        const stripDialogueFromMarkdown = (raw: string): string => {
+          if (!raw) return raw;
+          // Find `## Output` header and keep only what comes after it.
+          const outputMatch = /(?:^|\n)#{1,4}\s*Output\s*\n/i.exec(raw);
+          if (outputMatch && outputMatch.index !== undefined) {
+            return raw.slice(outputMatch.index + outputMatch[0].length).trim();
+          }
+          // No `## Output` header — but there's a leading `## Dialogue`. Drop
+          // everything up to the next `\n##` header (best effort).
+          const dialogueMatch = /(?:^|\n)#{1,4}\s*Dialogue\s*\n/i.exec(raw);
+          if (dialogueMatch && dialogueMatch.index !== undefined) {
+            const after = raw.slice(dialogueMatch.index + dialogueMatch[0].length);
+            const next = /\n#{1,4}\s+/.exec(after);
+            if (next) return after.slice(next.index).replace(/^\n+#{1,4}\s+\S+\s*\n/, "").trim();
+            // LLM only wrote dialogue (no output section yet) — keep original.
+          }
+          return raw;
+        };
+        const isJsonRole = codeRoles.has(role);
+        const replyForArtifact = isJsonRole ? res.reply : stripDialogueFromMarkdown(res.reply);
+
         // Persist artifacts for this wallet + mission.
         const parsed = parsedArtifacts ?? parseArtifacts(res.reply);
         // For code-generating roles: try to salvage partial artifacts from truncated JSON
@@ -1823,7 +1927,7 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
                     language: "md",
                     content: codeRoles.has(role)
                       ? `<!-- JSON parse failed / response truncated — repair loop will regenerate -->\n${res.reply}`
-                      : res.reply,
+                      : replyForArtifact,
                     kind: "note" as const,
                   },
                 ];
@@ -1934,28 +2038,39 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
     // to stay within Groq's TPM limits (large single-pass JSON regularly exceeds 6K tokens/min).
     const results: Array<any> = [];
     let devPhase1Paths: string[] = [];
-    for (const role of roles) {
-      if (role === "Coordination") continue;
+    // Compute the role chain so each agent's conversational dialogue can
+    // address the actual previous/next agents by name. Filter out Coordination
+    // (it's always last, handled below the loop).
+    const linearRoles = roles.filter((r) => r !== "Coordination");
+    const completedRoleHistory: string[] = [];
+    for (let i = 0; i < linearRoles.length; i++) {
+      const role = linearRoles[i]!;
+      const prevRoles = [...completedRoleHistory];
+      const nextRole = linearRoles[i + 1] ?? "Coordination";
       if (role === "Development") {
         // Phase 1: frontend scaffold (small JSON ≈ 2K tokens out)
-        const p1 = await runOne("Development", { artifactHeavy: false, userSuffix: devPhase1Suffix });
+        const p1 = await runOne("Development", { artifactHeavy: false, userSuffix: devPhase1Suffix, prevRoles, nextRole });
         results.push(p1);
         devPhase1Paths = Array.isArray(p1.artifactPaths) ? p1.artifactPaths : [];
         // Brief pause so TPM window partially resets before phase 2.
         await tpmPause();
         // Phase 2: components + backend + README (another small JSON ≈ 2K tokens out)
-        const p2 = await runOne("Development", { artifactHeavy: false, userSuffix: devPhase2Suffix(devPhase1Paths) });
+        const p2 = await runOne("Development", { artifactHeavy: false, userSuffix: devPhase2Suffix(devPhase1Paths), prevRoles, nextRole });
         results.push(p2);
         await tpmPause();
       } else {
-        results.push(await runOne(role));
+        results.push(await runOne(role, { prevRoles, nextRole }));
         // Pace Groq calls for non-code roles too.
         await tpmPause();
       }
+      completedRoleHistory.push(role);
     }
     // Always run Coordination last for final synthesis.
     const coordRole = configuredRoles.includes("Coordination") ? "Coordination" : "Strategy";
-    const final = await runOne(coordRole === "Strategy" ? "Coordination" : "Coordination");
+    const final = await runOne(
+      coordRole === "Strategy" ? "Coordination" : "Coordination",
+      { prevRoles: completedRoleHistory, nextRole: null },
+    );
     results.push(final);
 
     // ── Structural Guarantor ─────────────────────────────────────────────────
