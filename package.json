@@ -8,7 +8,8 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "db:up": "docker compose up -d",
-    "db:down": "docker compose down"
+    "db:down": "docker compose down",
+    "deploy": "npm run build && eb deploy hivemind-backend-prod"
   },
   "engines": {
     "node": ">=20"
