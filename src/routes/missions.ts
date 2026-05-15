@@ -1602,9 +1602,10 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       if (!j) return;
       swarmJobs.set(jobId, { ...j, progress: { ...(j.progress ?? { completedRoles: [], partialResults: [] }), currentRole: role } });
     };
-    /** Update the in-flight LLM token buffer the frontend polls. Coalesced so we
-     *  don't thrash the Map on every 5-byte chunk — only persist if the buffer
-     *  grew by ≥120 chars OR ≥250ms passed since the last persist. */
+    /** Update the in-flight LLM token buffer the frontend polls. Coalesced so
+     *  the Map isn't thrashed on every 4-byte chunk, but loose enough that the
+     *  live-coding effect actually feels live — flush every 40 chars or every
+     *  120 ms, whichever comes first. */
     let lastStreamPersistAt = 0;
     let lastStreamPersistLen = 0;
     const setStreamingBuffer = (role: string, buffer: string) => {
@@ -1612,8 +1613,8 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       if (!j) return;
       const now = Date.now();
       const grew = buffer.length - lastStreamPersistLen;
-      const overdue = now - lastStreamPersistAt > 250;
-      if (grew < 120 && !overdue) return;
+      const overdue = now - lastStreamPersistAt > 120;
+      if (grew < 40 && !overdue) return;
       lastStreamPersistAt = now;
       lastStreamPersistLen = buffer.length;
       const prev = j.progress ?? { currentRole: role, completedRoles: [], partialResults: [] };

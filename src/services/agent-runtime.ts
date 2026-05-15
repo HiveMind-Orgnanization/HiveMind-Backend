@@ -550,6 +550,7 @@ export async function invokeAgentCompletion(
       const url = `${apiBase.replace(/\/$/, "")}/chat/completions`;
       const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+      const useStream = Boolean(invokeOpts?.onStreamChunk);
       const callOnce = async (model: string, maxTokens: number, userCharCap: number): Promise<string> => {
         const res = await fetch(url, {
           method: "POST",
@@ -565,11 +566,45 @@ export async function invokeAgentCompletion(
             ],
             max_tokens: maxTokens,
             temperature: lowTempStructured ? 0.2 : 0.35,
+            ...(useStream ? { stream: true } : {}),
           }),
         });
         if (!res.ok) {
           const errText = await res.text().catch(() => "");
           throw new Error(`groq_http_${res.status}: ${errText.slice(0, 400)}`);
+        }
+        if (useStream && res.body) {
+          // Parse Groq's OpenAI-compatible SSE stream: lines of `data: {json}`,
+          // terminated by `data: [DONE]`. Feed deltas to onStreamChunk so the
+          // live-coding UX still works when we fall back from OpenAI to Groq.
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let acc = "";
+          let leftover = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            const chunk = leftover + decoder.decode(value, { stream: true });
+            const lines = chunk.split("\n");
+            leftover = lines.pop() ?? "";
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed || !trimmed.startsWith("data:")) continue;
+              const payload = trimmed.slice(5).trim();
+              if (payload === "[DONE]") continue;
+              try {
+                const obj = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
+                const delta = obj.choices?.[0]?.delta?.content ?? "";
+                if (delta) {
+                  acc += delta;
+                  try { invokeOpts!.onStreamChunk!(delta, acc); } catch { /* ignore */ }
+                }
+              } catch {
+                // partial SSE event — wait for next chunk
+              }
+            }
+          }
+          return acc.trim() || "(empty model response)";
         }
         const json = (await res.json()) as {
           choices?: { message?: { content?: string } }[];
