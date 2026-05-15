@@ -220,6 +220,16 @@ export type InvokeAgentOptions = {
   priority?: MissionPriority;
   /** Explicit OpenAI model id (ignored when env OPENAI_MODEL_ALL is set). */
   modelOverride?: string;
+  /**
+   * Fires for every streamed token chunk while the model is replying.
+   * `accumulated` is the full reply so far. When set, this hook switches the
+   * OpenAI call into `stream: true` mode so callers can mirror the LLM's text
+   * into a UI buffer in real time (used by the swarm runner to render
+   * artifact files as they are being written, instead of waiting for the
+   * full reply). Streaming only applies to the OpenAI primary path — Groq
+   * fallback still returns the full reply at once.
+   */
+  onStreamChunk?: (delta: string, accumulated: string) => void;
 };
 
 /** Groq small / instant models have tighter context + TPM limits — keep asks conservative. */
@@ -419,6 +429,7 @@ export async function invokeAgentCompletion(
         ? "none"
         : "low";
 
+    const streaming = Boolean(invokeOpts?.onStreamChunk);
     const baseParams: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = {
       model: pickedModel,
       messages,
@@ -429,18 +440,51 @@ export async function invokeAgentCompletion(
     };
     // `reasoning_effort` is a real OpenAI param for gpt-5.x but isn't surfaced in this
     // SDK version's typings — attach via cast so the field still flows through.
-    const params = reasoningEffort
+    const paramsNonStream = reasoningEffort
       ? ({ ...baseParams, reasoning_effort: reasoningEffort } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming)
       : baseParams;
-    const resp = await client.chat.completions.create(params);
-    const choice = resp.choices?.[0];
-    const finish = choice?.finish_reason;
-    const reply = choice?.message?.content?.trim() ?? "(empty model response)";
+
+    let reply = "(empty model response)";
+    let finish: string | null | undefined = undefined;
+    let usage: { completion_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } } | undefined;
+
+    if (streaming) {
+      // Streamed path — feeds chunks to the caller as they arrive (used to
+      // wire live LLM output into the workspace code editor while files are
+      // being written, instead of showing a spinner for 30-60s).
+      const streamParams = { ...paramsNonStream, stream: true } as unknown as OpenAI.Chat.ChatCompletionCreateParamsStreaming;
+      const stream = await client.chat.completions.create(streamParams);
+      let acc = "";
+      let lastFinish: string | null | undefined = undefined;
+      for await (const part of stream) {
+        const choice = part.choices?.[0];
+        const delta = choice?.delta?.content ?? "";
+        if (delta) {
+          acc += delta;
+          try {
+            invokeOpts!.onStreamChunk!(delta, acc);
+          } catch (cbErr) {
+            // Caller-side callback bugs shouldn't kill the LLM call.
+            console.warn("[hivemind] onStreamChunk threw:", (cbErr as Error).message);
+          }
+        }
+        if (choice?.finish_reason) lastFinish = choice.finish_reason;
+        const u = (part as { usage?: typeof usage }).usage;
+        if (u) usage = u;
+      }
+      reply = acc.trim() || reply;
+      finish = lastFinish;
+    } else {
+      const resp = await client.chat.completions.create(paramsNonStream);
+      const choice = resp.choices?.[0];
+      finish = choice?.finish_reason;
+      reply = choice?.message?.content?.trim() ?? "(empty model response)";
+      usage = (resp as { usage?: typeof usage }).usage;
+    }
     // Truncated by token budget: surface to caller so the repair loop / chat UX
     // can react ("response was cut off — agent will continue"). Avoid the silent
     // mid-stream cut-off that produced files like `import Snake from './` last run.
     if (finish === "length") {
-      const usage = (resp as { usage?: { completion_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } } }).usage;
       const c = usage?.completion_tokens ?? 0;
       const r = usage?.completion_tokens_details?.reasoning_tokens ?? 0;
       console.warn(

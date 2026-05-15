@@ -35,6 +35,14 @@ type SwarmJob = {
     currentRole: string | null;
     completedRoles: string[];
     partialResults: Array<{ role: string; agentName: string; replySnippet: string; provider: string; model: string }>;
+    /**
+     * In-flight LLM token buffer for the role currently being streamed.
+     * Updated on every chunk from OpenAI's streaming completion; the
+     * frontend polls swarm-status, parses the partial JSON to extract the
+     * current file path + partial content, and renders it live in the
+     * workspace code editor. Cleared when the role finishes (pushProgress).
+     */
+    streamingReply?: { role: string; buffer: string };
   };
 };
 const swarmJobs = new Map<string, SwarmJob>();
@@ -1579,12 +1587,49 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       const j = swarmJobs.get(jobId);
       if (!j) return;
       const prev = j.progress ?? { currentRole: null, completedRoles: [], partialResults: [] };
-      swarmJobs.set(jobId, { ...j, progress: { currentRole: null, completedRoles: [...prev.completedRoles, role], partialResults: [...prev.partialResults, { role, agentName, replySnippet, provider, model }] } });
+      // Clear streamingReply on role finish — the next role will repopulate it.
+      swarmJobs.set(jobId, {
+        ...j,
+        progress: {
+          currentRole: null,
+          completedRoles: [...prev.completedRoles, role],
+          partialResults: [...prev.partialResults, { role, agentName, replySnippet, provider, model }],
+        },
+      });
     };
     const setCurrentRole = (role: string | null) => {
       const j = swarmJobs.get(jobId);
       if (!j) return;
       swarmJobs.set(jobId, { ...j, progress: { ...(j.progress ?? { completedRoles: [], partialResults: [] }), currentRole: role } });
+    };
+    /** Update the in-flight LLM token buffer the frontend polls. Coalesced so we
+     *  don't thrash the Map on every 5-byte chunk — only persist if the buffer
+     *  grew by ≥120 chars OR ≥250ms passed since the last persist. */
+    let lastStreamPersistAt = 0;
+    let lastStreamPersistLen = 0;
+    const setStreamingBuffer = (role: string, buffer: string) => {
+      const j = swarmJobs.get(jobId);
+      if (!j) return;
+      const now = Date.now();
+      const grew = buffer.length - lastStreamPersistLen;
+      const overdue = now - lastStreamPersistAt > 250;
+      if (grew < 120 && !overdue) return;
+      lastStreamPersistAt = now;
+      lastStreamPersistLen = buffer.length;
+      const prev = j.progress ?? { currentRole: role, completedRoles: [], partialResults: [] };
+      swarmJobs.set(jobId, {
+        ...j,
+        progress: { ...prev, streamingReply: { role, buffer } },
+      });
+    };
+    const clearStreamingBuffer = () => {
+      lastStreamPersistAt = 0;
+      lastStreamPersistLen = 0;
+      const j = swarmJobs.get(jobId);
+      if (!j?.progress) return;
+      const { streamingReply: _drop, ...rest } = j.progress;
+      void _drop;
+      swarmJobs.set(jobId, { ...j, progress: rest });
     };
 
     const runOne = async (role: string, opts?: { userSuffix?: string; artifactHeavy?: boolean }) => {
@@ -1615,6 +1660,7 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
         `mission:${id}`,
       );
       setCurrentRole(role);
+      clearStreamingBuffer();
 
       const artifactJsonRoles = new Set(["Development", "Coordination", "Design"]);
       const landingSupplement =
@@ -1625,11 +1671,20 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       const missionConfig = (m as any)?.config as Record<string, unknown> | undefined;
       const missionPriorityKey = ((missionConfig?.priorityKey ?? "std") as string) as MissionPriority;
       const agentModelOverride = (missionConfig?.agentModels as Record<string, string> | undefined)?.[role];
+      // Stream the LLM output back into swarmJobs so the workspace code panel
+      // can render files char-by-char while they're being written. Only enable
+      // for the JSON-artifact roles where the buffer actually contains a path +
+      // content the frontend can parse — markdown roles like Marketing don't
+      // benefit and would just churn the polling endpoint.
+      const enableStream = artifactJsonRoles.has(role);
       const invokeSwarmOpts = {
         swarmArtifactStep: artifactJsonRoles.has(role),
         artifactHeavy: artifactHeavyFlag,
         priority: missionPriorityKey,
         ...(agentModelOverride ? { modelOverride: agentModelOverride } : {}),
+        ...(enableStream
+          ? { onStreamChunk: (_delta: string, accumulated: string) => setStreamingBuffer(role, accumulated) }
+          : {}),
       };
 
       try {
