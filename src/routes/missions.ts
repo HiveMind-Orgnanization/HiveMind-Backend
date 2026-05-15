@@ -1447,12 +1447,21 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       // Coordination sees medium context; all others get brief summaries.
       const snippetLimit = (role: string) =>
         role === "Coordination" ? 3000 : 1400;
+      // Strip the conversational `## Dialogue` opener from prior markdown
+      // replies so the next agent doesn't waste context-window budget on
+      // small-talk that's already been delivered to the user.
+      const stripMarkdownDialogue = (raw: string): string => {
+        const out = /(?:^|\n)#{1,4}\s*Output\s*\n/i.exec(raw);
+        if (out && out.index !== undefined) return raw.slice(out.index + out[0].length).trim();
+        return raw;
+      };
       const parts = [
         `## Mission brief (canonical spec)\n${briefBlock.slice(0, 2000)}`,
         ...[...outputByRole.entries()].map(([role, v]) => {
           const limit = snippetLimit(currentRole ?? role);
-          const snippet = v.reply.trim().slice(0, limit);
-          return `## ${role} output (${v.agentName})\n${snippet}${v.reply.length > snippet.length ? "\n…" : ""}`;
+          const cleaned = stripMarkdownDialogue(v.reply).trim();
+          const snippet = cleaned.slice(0, limit);
+          return `## ${role} output (${v.agentName})\n${snippet}${cleaned.length > snippet.length ? "\n…" : ""}`;
         }),
       ];
       return parts.length ? parts.join("\n\n") : "(none yet)";
