@@ -1536,15 +1536,22 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
           "Reply MUST start with exactly these two markdown sections, in this order:",
           "",
           "## Dialogue",
-          `<3-5 sentences (60-120 words) addressed to ${prevList} by name —`,
-          ` thank them for ONE specific thing they produced (a metric, a route,`,
-          ` a positioning line), state what YOU’ll do, end with a direct`,
-          ` handoff to ${handoff}>`,
+          `<EXACTLY 3-5 sentences (60-120 words, NO MORE) addressed to ${prevList}`,
+          " by name. Thank them for ONE specific thing they produced. State what",
+          ` YOU’ll do in 1-2 sentences. End with a handoff to ${handoff}.>`,
           "",
           "## Output",
           "<your normal deliverable below — same content you would have produced anyway>",
           "",
-          "If you skip the `## Dialogue` section, your work is wasted — the user only sees that section in the chat panel.",
+          "CRITICAL CONSTRAINTS:",
+          " • The Dialogue section is CHAT — short, conversational, no bullet lists,",
+          "   no headings, no bold-everything, no numbered points, no tables.",
+          " • Put ALL bullet lists, headings, tables, numbered lists, and the actual",
+          `   deliverable content under "## Output" — NEVER under "## Dialogue".`,
+          " • If the dialogue runs over 5 sentences, truncate yourself.",
+          "",
+          "If you skip the `## Dialogue` section OR dump output into it, the chat",
+          "panel will show garbage and your reply will look broken.",
         );
       }
       intro.push(
@@ -1700,8 +1707,11 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
     };
     /** Update the in-flight LLM token buffer the frontend polls. Coalesced so
      *  the Map isn't thrashed on every 4-byte chunk, but loose enough that the
-     *  live-coding effect actually feels live — flush every 40 chars or every
-     *  120 ms, whichever comes first. */
+     *  live-coding effect actually feels live — flush every 20 chars or every
+     *  80 ms, whichever comes first. Tightened from 40/120 because users were
+     *  perceiving updates as "lumpy" — small bursts then nothing then a big
+     *  jump. Per-poll cost is fine: the frontend polls at 500ms intervals so
+     *  it only sees the latest snapshot anyway. */
     let lastStreamPersistAt = 0;
     let lastStreamPersistLen = 0;
     const setStreamingBuffer = (role: string, buffer: string) => {
@@ -1709,8 +1719,8 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       if (!j) return;
       const now = Date.now();
       const grew = buffer.length - lastStreamPersistLen;
-      const overdue = now - lastStreamPersistAt > 120;
-      if (grew < 40 && !overdue) return;
+      const overdue = now - lastStreamPersistAt > 80;
+      if (grew < 20 && !overdue) return;
       lastStreamPersistAt = now;
       lastStreamPersistLen = buffer.length;
       const prev = j.progress ?? { currentRole: role, completedRoles: [], partialResults: [] };
