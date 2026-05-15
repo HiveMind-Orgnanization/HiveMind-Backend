@@ -1507,35 +1507,52 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
       const prevList = prevRoles.length > 0 ? prevRoles.join(", ") : "HiveMind (mission orchestrator)";
       const handoff = nextRole ?? "Coordination (final integrator)";
       const isJsonRole = ["Design", "Development", "Coordination"].includes(role);
+      // The output FORMAT is the most important thing to communicate — put it
+      // first, repeat it, make it unmissable. Earlier (less-strict) prompts
+      // were silently ignored by gpt-5.x and the user saw no dialogue at all.
       const intro = [
-        "── Conversational dialogue (REQUIRED, this is how the user sees the swarm work) ──",
-        `You are ${role}. The previous agent${prevRoles.length === 1 ? "" : "s"} that just finished: ${prevList}.`,
-        `The next agent that will receive your output: ${handoff}.`,
-        "",
-        "Write a short conversational opener (3-5 sentences, ~60-100 words) that:",
-        `  • Greets / thanks ${prevList} by name and references ONE specific thing they produced (a metric, a class name, a route, a positioning line — be specific, not generic).`,
-        "  • States in first person what YOU will do next and which trade-off you're making.",
-        `  • Ends with a direct handoff to ${handoff} (e.g. \"${handoff}, you'll get my <thing> next — focus on <thing>\").`,
-        "",
-        "Tone: warm, decisive, plain English, the way senior teammates talk in Slack. NOT corporate (\"leveraging synergies\"), NOT robotic (\"Task complete.\"), NOT vague (\"good job team\"). Be a person.",
+        "═══════════════════════════════════════════════════════════════════",
+        "OUTPUT CONTRACT — MUST FOLLOW EXACTLY OR THE REPLY IS DISCARDED",
+        "═══════════════════════════════════════════════════════════════════",
       ];
       if (isJsonRole) {
         intro.push(
+          'Reply with ONE JSON object. The FIRST field MUST be "dialogue" — a',
+          "string containing 3-5 sentences (60-120 words) of conversational text",
+          `addressed to ${prevList} by name. AFTER "dialogue", emit "summary"`,
+          'and "artifacts" as you normally would.',
           "",
-          'Put this message in the JSON envelope as a top-level "dialogue" string field, BEFORE "summary". Example shape (truncated):',
-          '  { "dialogue": "Hey Design — that color palette is sharp...", "summary": "...", "artifacts": [...] }',
+          "Example shape (no markdown fences, JSON only):",
+          '  {',
+          `    "dialogue": "Hey ${prevList} — that <specific thing they made> is solid. I'll <what you’ll do in 2-3 sentences>. ${handoff}, you’ll get <thing> next.",`,
+          '    "summary": "<one-line summary as before>",',
+          '    "artifacts": [ ... ]',
+          '  }',
+          "",
+          "If you skip the dialogue field, your work is wasted — the user only sees that field in the chat panel.",
         );
       } else {
         intro.push(
+          "Reply MUST start with exactly these two markdown sections, in this order:",
           "",
-          "Format your reply with this exact structure (two markdown headers):",
-          "  ## Dialogue",
-          "  <your conversational opener here>",
+          "## Dialogue",
+          `<3-5 sentences (60-120 words) addressed to ${prevList} by name —`,
+          ` thank them for ONE specific thing they produced (a metric, a route,`,
+          ` a positioning line), state what YOU’ll do, end with a direct`,
+          ` handoff to ${handoff}>`,
           "",
-          "  ## Output",
-          "  <your normal deliverable below — same content you would have produced anyway>",
+          "## Output",
+          "<your normal deliverable below — same content you would have produced anyway>",
+          "",
+          "If you skip the `## Dialogue` section, your work is wasted — the user only sees that section in the chat panel.",
         );
       }
+      intro.push(
+        "═══════════════════════════════════════════════════════════════════",
+        "",
+        `You are ${role}. Previous agent${prevRoles.length === 1 ? "" : "s"}: ${prevList}. Next agent: ${handoff}.`,
+        "Tone for the dialogue: warm, decisive, plain English, the way senior teammates talk in Slack. NOT corporate, NOT robotic, NOT vague — be a person.",
+      );
       return intro.join("\n");
     };
 
@@ -1792,10 +1809,13 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
               return role === "Coordination" ? null : "Coordination";
             })();
         const dialogueBlock = dialogueInstruction(role, autoPrev, autoNext);
+        // Dialogue requirement moves to the TOP of the roleBlock so the model
+        // sees it first, BEFORE the long role instruction. Earlier order put
+        // it after roleInstruction and the LLM consistently ignored it.
         const roleBlock = [
+          dialogueBlock,
           `Your role: ${role}`,
           roleInstruction(role),
-          dialogueBlock,
           landingSupplement,
           designRagBlock,
           opts?.userSuffix ? `\n${opts.userSuffix}` : "",
