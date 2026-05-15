@@ -1334,11 +1334,26 @@ export async function missionsRoutes(app: FastifyInstance, hub: RealtimeHub, cfg
         agents.find((a) => a.specialization === "Coordination") ??
         agents.find((a) => a.specialization === "Strategy") ??
         agents[0];
+      // Stream the brief generation into the same streamingReply field the
+      // frontend already watches. We surface it under a "HiveMind" pseudo-role
+      // so the bootstrap thought updates live instead of the user staring at
+      // "generating the mission brief…" for 10-30s with no movement.
       const briefRes = await invokeAgentCompletion(
         cfg ?? ({ GROQ_API_KEY: undefined } as AppConfig),
         briefAgent,
         briefPrompt(title, objective),
         `${title}\n${objective}`,
+        {
+          onStreamChunk: (_d, acc) => {
+            const job = swarmJobs.get(jobId);
+            if (!job) return;
+            const prev = job.progress ?? { currentRole: "HiveMind", completedRoles: [], partialResults: [] };
+            swarmJobs.set(jobId, {
+              ...job,
+              progress: { ...prev, currentRole: prev.currentRole ?? "HiveMind", streamingReply: { role: "HiveMind", buffer: acc } },
+            });
+          },
+        },
       );
       brief = safeJsonParse(briefRes.reply) ?? { summary: briefRes.reply };
       const briefUpdatedAt = Date.now();
