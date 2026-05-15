@@ -277,6 +277,16 @@ function requiresMaxCompletionTokens(model: string): boolean {
   return isReasoningModel(model) || /^gpt-5/i.test(model);
 }
 
+/**
+ * Models that REJECT a custom `temperature` parameter — they only accept the
+ * default (1). gpt-5.x returns `400 Unsupported value: 'temperature'` if we
+ * send 0.35. Same for o1/o3/o4 reasoning models. Send NO temperature param
+ * at all for these so the SDK uses the model default.
+ */
+function supportsCustomTemperature(model: string): boolean {
+  return !isReasoningModel(model) && !/^gpt-5/i.test(model);
+}
+
 function completionBudget(
   agent: AgentProfile,
   model: string,
@@ -436,7 +446,7 @@ export async function invokeAgentCompletion(
       ...(useCompletionTokens
         ? { max_completion_tokens: maxTok }
         : { max_tokens: maxTok }),
-      ...(reasoning ? {} : { temperature: lowTempStructured ? 0.2 : 0.35 }),
+      ...(supportsCustomTemperature(pickedModel) ? { temperature: lowTempStructured ? 0.2 : 0.35 } : {}),
     };
     // `reasoning_effort` is a real OpenAI param for gpt-5.x but isn't surfaced in this
     // SDK version's typings — attach via cast so the field still flows through.
